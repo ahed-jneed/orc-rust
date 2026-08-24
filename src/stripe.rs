@@ -167,8 +167,14 @@ impl Stripe {
         let tz = footer
             .writer_timezone
             .as_ref()
-            // TODO: make this return error
-            .map(|a| a.parse::<chrono_tz::Tz>().unwrap());
+            .map(|a| {
+                a.parse::<chrono_tz::Tz>()
+                    .map_err(|_| crate::error::OrcError::OutOfSpec {
+                        msg: format!("invalid writer timezone '{a}'"),
+                        location: snafu::Location::new(file!(), line!(), column!()),
+                    })
+            })
+            .transpose()?;
 
         Ok(Self {
             columns,
@@ -230,8 +236,14 @@ impl Stripe {
         let tz = footer
             .writer_timezone
             .as_ref()
-            // TODO: make this return error
-            .map(|a| a.parse::<chrono_tz::Tz>().unwrap());
+            .map(|a| {
+                a.parse::<chrono_tz::Tz>()
+                    .map_err(|_| crate::error::OrcError::OutOfSpec {
+                        msg: format!("invalid writer timezone '{a}'"),
+                        location: snafu::Location::new(file!(), line!(), column!()),
+                    })
+            })
+            .transpose()?;
 
         Ok(Self {
             columns,
