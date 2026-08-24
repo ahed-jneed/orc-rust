@@ -61,7 +61,7 @@ fn read_bloom_filters<R: ChunkReader>(
 ) -> Result<HashMap<usize, Vec<BloomFilter>>> {
     // Read stripe footer to get stream information
     let footer_bytes = reader
-        .get_bytes(stripe.footer_offset(), stripe.footer_length())
+        .get_bytes(stripe.footer_offset()?, stripe.footer_length())
         .context("reading stripe footer")?;
 
     let mut decompressed = Vec::new();
@@ -109,7 +109,9 @@ fn read_bloom_filters<R: ChunkReader>(
             }
         }
 
-        stream_offset += length;
+        stream_offset = stream_offset
+            .checked_add(length)
+            .context("stripe stream offsets overflow")?;
     }
 
     Ok(bloom_filters)

@@ -31,7 +31,10 @@ use crate::proto::stream::Kind;
 use crate::error::{ArrowSnafu, Result};
 use crate::stripe::Stripe;
 
-use super::{array_decoder_factory, ArrayBatchDecoder, PresentDecoder};
+use super::{
+    array_decoder_factory, checked_total_length, ArrayBatchDecoder, PresentDecoder,
+    MAX_ARRAY_ELEMENTS_PER_BATCH,
+};
 
 pub struct ListArrayDecoder {
     inner: Box<dyn ArrayBatchDecoder>,
@@ -74,9 +77,10 @@ impl ArrayBatchDecoder for ListArrayDecoder {
         } else {
             self.lengths.decode(&mut lengths)?;
         }
-        let total_length: i64 = lengths.iter().sum();
+        let total_length =
+            checked_total_length(&lengths, MAX_ARRAY_ELEMENTS_PER_BATCH, "list element")?;
         // Fetch child array as one Array with total_length elements
-        let child_array = self.inner.next_batch(total_length as usize, None)?;
+        let child_array = self.inner.next_batch(total_length, None)?;
         let offsets = OffsetBuffer::from_lengths(lengths.into_iter().map(|l| l as usize));
         let null_buffer = present;
 
@@ -95,10 +99,11 @@ impl ArrayBatchDecoder for ListArrayDecoder {
         // Decode lengths to determine how many child values to skip
         let mut lengths = vec![0; non_null_count];
         self.lengths.decode(&mut lengths)?;
-        let total_length: i64 = lengths.iter().sum();
+        let total_length =
+            checked_total_length(&lengths, MAX_ARRAY_ELEMENTS_PER_BATCH, "list element")?;
 
         // Skip the child values (children don't have parent_present from list)
-        self.inner.skip_values(total_length as usize, None)?;
+        self.inner.skip_values(total_length, None)?;
 
         Ok(())
     }

@@ -58,6 +58,46 @@ mod struct_decoder;
 mod timestamp;
 mod union;
 
+/// Bound decoded nested cardinalities before asking child decoders to allocate.
+pub(crate) const MAX_ARRAY_ELEMENTS_PER_BATCH: usize = 8 * 1024 * 1024;
+/// Bound decoded variable-width bytes before allocating an Arrow buffer.
+pub(crate) const MAX_ARRAY_BYTES_PER_BATCH: usize = 64 * 1024 * 1024;
+
+pub(crate) fn checked_total_length(
+    lengths: &[i64],
+    limit: usize,
+    description: &str,
+) -> Result<usize> {
+    let mut total = 0usize;
+    for &length in lengths {
+        let length = match usize::try_from(length) {
+            Ok(length) => length,
+            Err(_) => {
+                return error::OutOfSpecSnafu {
+                    msg: format!("negative {description} length"),
+                }
+                .fail()
+            }
+        };
+        total = match total.checked_add(length) {
+            Some(total) => total,
+            None => {
+                return error::OutOfSpecSnafu {
+                    msg: format!("{description} lengths overflow"),
+                }
+                .fail()
+            }
+        };
+    }
+    if total > limit {
+        return error::OutOfSpecSnafu {
+            msg: format!("{description} length exceeds {limit}-element limit"),
+        }
+        .fail();
+    }
+    Ok(total)
+}
+
 pub trait ArrayBatchDecoder: Send {
     /// Used as base for decoding ORC columns into Arrow arrays. Provide an input `batch_size`
     /// which specifies the upper limit of the number of values returned in the output array.
@@ -601,5 +641,31 @@ impl NaiveStripeDecoder {
             decoder.skip_values(count, None)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::{checked_total_length, MAX_ARRAY_BYTES_PER_BATCH, MAX_ARRAY_ELEMENTS_PER_BATCH};
+
+    #[test]
+    fn decoded_lengths_reject_negative_and_overflowing_values() {
+        assert!(checked_total_length(&[-1], MAX_ARRAY_ELEMENTS_PER_BATCH, "list element").is_err());
+        assert!(checked_total_length(
+            &[i64::MAX, i64::MAX],
+            MAX_ARRAY_ELEMENTS_PER_BATCH,
+            "list element"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn decoded_lengths_reject_values_over_the_budget() {
+        assert!(checked_total_length(
+            &[(MAX_ARRAY_BYTES_PER_BATCH + 1) as i64],
+            MAX_ARRAY_BYTES_PER_BATCH,
+            "string/binary data"
+        )
+        .is_err());
     }
 }

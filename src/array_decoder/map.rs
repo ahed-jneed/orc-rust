@@ -30,7 +30,10 @@ use crate::error::{ArrowSnafu, Result};
 use crate::proto::stream::Kind;
 use crate::stripe::Stripe;
 
-use super::{array_decoder_factory, ArrayBatchDecoder, PresentDecoder};
+use super::{
+    array_decoder_factory, checked_total_length, ArrayBatchDecoder, PresentDecoder,
+    MAX_ARRAY_ELEMENTS_PER_BATCH,
+};
 
 pub struct MapArrayDecoder {
     keys: Box<dyn ArrayBatchDecoder>,
@@ -85,11 +88,12 @@ impl ArrayBatchDecoder for MapArrayDecoder {
         } else {
             self.lengths.decode(&mut lengths)?;
         }
-        let total_length: i64 = lengths.iter().sum();
+        let total_length =
+            checked_total_length(&lengths, MAX_ARRAY_ELEMENTS_PER_BATCH, "map entry")?;
         // Fetch key and value arrays, each with total_length elements
         // Fetch child array as one Array with total_length elements
-        let keys_array = self.keys.next_batch(total_length as usize, None)?;
-        let values_array = self.values.next_batch(total_length as usize, None)?;
+        let keys_array = self.keys.next_batch(total_length, None)?;
+        let values_array = self.values.next_batch(total_length, None)?;
         // Compose the keys + values array into a StructArray with two entries
         let entries =
             StructArray::try_new(self.fields.clone(), vec![keys_array, values_array], None)
@@ -112,11 +116,12 @@ impl ArrayBatchDecoder for MapArrayDecoder {
         // Decode lengths to determine how many entries to skip
         let mut lengths = vec![0; non_null_count];
         self.lengths.decode(&mut lengths)?;
-        let total_length: i64 = lengths.iter().sum();
+        let total_length =
+            checked_total_length(&lengths, MAX_ARRAY_ELEMENTS_PER_BATCH, "map entry")?;
 
         // Skip both keys and values (they don't have parent_present from map)
-        self.keys.skip_values(total_length as usize, None)?;
-        self.values.skip_values(total_length as usize, None)?;
+        self.keys.skip_values(total_length, None)?;
+        self.values.skip_values(total_length, None)?;
 
         Ok(())
     }
