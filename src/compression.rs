@@ -419,6 +419,8 @@ pub(crate) fn read_decompressed_section(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
 
     #[test]
@@ -464,5 +466,28 @@ mod tests {
         let result = Lzo.decompress_block(&[0; 4], &mut scratch);
         assert!(result.is_err());
         assert!(scratch.is_empty());
+    }
+
+    #[test]
+    fn zlib_orc_block_round_trips_through_the_bounded_reader() {
+        let payload = b"compressed ORC payload";
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(payload).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let block_length = (compressed.len() as u32) << 1;
+        let header = block_length.to_le_bytes();
+        let mut stream = Vec::with_capacity(compressed.len() + 3);
+        stream.extend_from_slice(&header[..3]);
+        stream.extend_from_slice(&compressed);
+
+        let compression = Compression {
+            compression_type: CompressionType::Zlib,
+            max_decompressed_block_size: DEFAULT_COMPRESSION_BLOCK_SIZE as usize,
+        };
+        let mut reader = Decompressor::new(Bytes::from(stream), Some(compression), vec![]);
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output).unwrap();
+        assert_eq!(output, payload);
     }
 }
