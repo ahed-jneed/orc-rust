@@ -15,15 +15,15 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::{collections::HashMap, io::Read, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use prost::Message;
-use snafu::ResultExt;
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::{
     column::Column,
-    compression::{Compression, Decompressor},
+    compression::{read_decompressed_section, Compression, Decompressor},
     error::{self, IoSnafu, Result},
     proto::{self, stream::Kind, StripeFooter},
     reader::{metadata::FileMetadata, ChunkReader},
@@ -50,6 +50,10 @@ pub struct StripeMetadata {
     number_of_rows: u64,
 }
 
+/// A stripe retains selected streams in memory while its arrays are decoded.
+/// Bound the aggregate rather than only each individual stream request.
+const MAX_STRIPE_STREAM_BYTES: u64 = 512 * 1024 * 1024;
+
 impl StripeMetadata {
     pub fn offset(&self) -> u64 {
         self.offset
@@ -75,8 +79,13 @@ impl StripeMetadata {
         &self.column_statistics
     }
 
-    pub fn footer_offset(&self) -> u64 {
-        self.offset + self.index_length + self.data_length
+    pub fn footer_offset(&self) -> Result<u64> {
+        self.offset
+            .checked_add(self.index_length)
+            .and_then(|offset| offset.checked_add(self.data_length))
+            .context(error::OutOfSpecSnafu {
+                msg: "stripe footer offset overflows",
+            })
     }
 }
 
@@ -132,7 +141,7 @@ impl Stripe {
         info: &StripeMetadata,
     ) -> Result<Self> {
         let footer = reader
-            .get_bytes(info.footer_offset(), info.footer_length())
+            .get_bytes(info.footer_offset()?, info.footer_length())
             .context(IoSnafu)?;
         let footer = Arc::new(deserialize_stripe_footer(
             footer,
@@ -151,6 +160,7 @@ impl Stripe {
             })
             .collect();
 
+        validate_stream_layout(projected_data_type, &footer, info.offset())?;
         let mut stream_map = HashMap::new();
         let mut stream_offset = info.offset();
         for stream in &footer.streams {
@@ -161,7 +171,11 @@ impl Stripe {
                 let data = reader.get_bytes(stream_offset, length).context(IoSnafu)?;
                 stream_map.insert((column_id, kind), data);
             }
-            stream_offset += length;
+            stream_offset = stream_offset
+                .checked_add(length)
+                .context(error::OutOfSpecSnafu {
+                    msg: "stripe stream offsets overflow",
+                })?;
         }
 
         let tz = footer
@@ -182,7 +196,12 @@ impl Stripe {
                 inner: stream_map,
                 compression: file_metadata.compression(),
             },
-            number_of_rows: info.number_of_rows() as usize,
+            number_of_rows: usize::try_from(info.number_of_rows()).map_err(|_| {
+                error::OutOfSpecSnafu {
+                    msg: "stripe row count does not fit in usize",
+                }
+                .build()
+            })?,
             tz,
         })
     }
@@ -196,7 +215,7 @@ impl Stripe {
         info: &StripeMetadata,
     ) -> Result<Self> {
         let footer = reader
-            .get_bytes(info.footer_offset(), info.footer_length())
+            .get_bytes(info.footer_offset()?, info.footer_length())
             .await
             .context(IoSnafu)?;
         let footer = Arc::new(deserialize_stripe_footer(
@@ -216,6 +235,7 @@ impl Stripe {
             })
             .collect();
 
+        validate_stream_layout(projected_data_type, &footer, info.offset())?;
         let mut stream_map = HashMap::new();
         let mut stream_offset = info.offset();
         for stream in &footer.streams {
@@ -230,7 +250,11 @@ impl Stripe {
                 stream_map.insert((column_id, kind), data);
             }
 
-            stream_offset += length;
+            stream_offset = stream_offset
+                .checked_add(length)
+                .context(error::OutOfSpecSnafu {
+                    msg: "stripe stream offsets overflow",
+                })?;
         }
 
         let tz = footer
@@ -251,7 +275,12 @@ impl Stripe {
                 inner: stream_map,
                 compression: file_metadata.compression(),
             },
-            number_of_rows: info.number_of_rows() as usize,
+            number_of_rows: usize::try_from(info.number_of_rows()).map_err(|_| {
+                error::OutOfSpecSnafu {
+                    msg: "stripe row count does not fit in usize",
+                }
+                .build()
+            })?,
             tz,
         })
     }
@@ -351,9 +380,86 @@ fn deserialize_stripe_footer(
     bytes: Bytes,
     compression: Option<Compression>,
 ) -> Result<StripeFooter> {
-    let mut buffer = vec![];
-    Decompressor::new(bytes, compression, vec![])
-        .read_to_end(&mut buffer)
-        .context(error::IoSnafu)?;
+    let buffer = read_decompressed_section(bytes, compression)?;
     StripeFooter::decode(buffer.as_slice()).context(error::DecodeProtoSnafu)
+}
+
+fn validate_stream_layout(
+    projected_data_type: &RootDataType,
+    footer: &StripeFooter,
+    start_offset: u64,
+) -> Result<()> {
+    let mut stream_offset = start_offset;
+    let mut selected_bytes = 0u64;
+    for stream in &footer.streams {
+        let length = stream.length();
+        if projected_data_type.contains_column_index(stream.column() as usize) {
+            selected_bytes = selected_bytes
+                .checked_add(length)
+                .context(error::OutOfSpecSnafu {
+                    msg: "selected stripe stream bytes overflow",
+                })?;
+            ensure!(
+                selected_bytes <= MAX_STRIPE_STREAM_BYTES,
+                error::OutOfSpecSnafu {
+                    msg: format!(
+                        "selected stripe streams exceed {MAX_STRIPE_STREAM_BYTES}-byte limit"
+                    )
+                }
+            );
+        }
+        stream_offset = stream_offset
+            .checked_add(length)
+            .context(error::OutOfSpecSnafu {
+                msg: "stripe stream offsets overflow",
+            })?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn footer_offset_overflow_is_rejected() {
+        let metadata = StripeMetadata {
+            column_statistics: vec![],
+            offset: u64::MAX,
+            index_length: 1,
+            data_length: 0,
+            footer_length: 0,
+            number_of_rows: 0,
+        };
+        assert!(metadata.footer_offset().is_err());
+    }
+
+    #[test]
+    fn selected_stream_budget_is_cumulative() {
+        use crate::proto::{r#type::Kind as TypeKind, stream::Kind, Stream, StripeFooter, Type};
+
+        let schema = RootDataType::from_proto(&[
+            Type {
+                kind: Some(TypeKind::Struct.into()),
+                subtypes: vec![1],
+                field_names: vec!["value".to_string()],
+                ..Default::default()
+            },
+            Type {
+                kind: Some(TypeKind::Int.into()),
+                ..Default::default()
+            },
+        ])
+        .unwrap();
+        let stream = |length| Stream {
+            kind: Some(Kind::Data.into()),
+            column: Some(1),
+            length: Some(length),
+        };
+        let footer = StripeFooter {
+            streams: vec![stream(300 * 1024 * 1024), stream(300 * 1024 * 1024)],
+            ..Default::default()
+        };
+        assert!(validate_stream_layout(&schema, &footer, 0).is_err());
+    }
 }

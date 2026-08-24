@@ -41,14 +41,12 @@
 //! If they are compressed then their lengths indicate their
 //! compressed lengths.
 
-use std::collections::HashMap;
-use std::io::Read;
-
 use bytes::{Bytes, BytesMut};
 use prost::Message;
 use snafu::{ensure, OptionExt, ResultExt};
+use std::collections::HashMap;
 
-use crate::compression::{Compression, Decompressor};
+use crate::compression::{read_decompressed_section, Compression};
 use crate::error::{self, EmptyFileSnafu, OutOfSpecSnafu, Result};
 use crate::proto::{self, Footer, Metadata, PostScript};
 use crate::schema::RootDataType;
@@ -357,17 +355,11 @@ pub async fn read_metadata_async<R: super::AsyncChunkReader>(
 }
 
 fn deserialize_footer(bytes: Bytes, compression: Option<Compression>) -> Result<Footer> {
-    let mut buffer = vec![];
-    Decompressor::new(bytes, compression, vec![])
-        .read_to_end(&mut buffer)
-        .context(error::IoSnafu)?;
+    let buffer = read_decompressed_section(bytes, compression)?;
     Footer::decode(buffer.as_slice()).context(error::DecodeProtoSnafu)
 }
 
 fn deserialize_footer_metadata(bytes: Bytes, compression: Option<Compression>) -> Result<Metadata> {
-    let mut buffer = vec![];
-    Decompressor::new(bytes, compression, vec![])
-        .read_to_end(&mut buffer)
-        .context(error::IoSnafu)?;
+    let buffer = read_decompressed_section(bytes, compression)?;
     Metadata::decode(buffer.as_slice()).context(error::DecodeProtoSnafu)
 }

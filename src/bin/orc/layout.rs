@@ -83,7 +83,7 @@ fn read_stripe_footer<R: ChunkReader>(
     compression: Option<Compression>,
 ) -> Result<StripeFooter> {
     let footer_bytes = reader
-        .get_bytes(stripe.footer_offset(), stripe.footer_length())
+        .get_bytes(stripe.footer_offset()?, stripe.footer_length())
         .context("reading stripe footer")?;
     let mut buffer = Vec::new();
     Decompressor::new(footer_bytes, compression, vec![])

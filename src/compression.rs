@@ -33,6 +33,7 @@ const DEFAULT_COMPRESSION_BLOCK_SIZE: u64 = 256 * 1024;
 /// unbounded allocation. The reader consumes one block at a time, so this is
 /// also the maximum transient decompression buffer.
 const MAX_DECOMPRESSED_BLOCK_SIZE: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_DECOMPRESSED_SECTION_SIZE: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Compression {
@@ -185,14 +186,13 @@ impl DecompressorVariant for Snappy {
 }
 
 impl DecompressorVariant for Lzo {
-    fn decompress_block(&self, compressed_bytes: &[u8], scratch: &mut Vec<u8>) -> Result<()> {
-        let decompressed = lzokay_native::decompress_all(compressed_bytes, None)
-            .context(error::BuildLzoDecoderSnafu)?;
-        ensure_block_limit(decompressed.len()).context(error::IoSnafu)?;
-        // TODO: better way to utilize scratch here
-        scratch.clear();
-        scratch.extend(decompressed);
-        Ok(())
+    fn decompress_block(&self, _compressed_bytes: &[u8], _scratch: &mut Vec<u8>) -> Result<()> {
+        // lzokay_native::decompress_all allocates the complete output before it
+        // returns, so it cannot be safely bounded for untrusted ORC input.
+        error::OutOfSpecSnafu {
+            msg: "LZO-compressed ORC streams are unsupported by the bounded reader",
+        }
+        .fail()
     }
 }
 
@@ -396,6 +396,27 @@ impl std::io::Read for Decompressor {
     }
 }
 
+/// Decompress one metadata/footer section with a cumulative output bound.
+pub(crate) fn read_decompressed_section(
+    bytes: Bytes,
+    compression: Option<Compression>,
+) -> Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+    Decompressor::new(bytes, compression, vec![])
+        .take((MAX_DECOMPRESSED_SECTION_SIZE + 1) as u64)
+        .read_to_end(&mut buffer)
+        .context(error::IoSnafu)?;
+    if buffer.len() > MAX_DECOMPRESSED_SECTION_SIZE {
+        return error::OutOfSpecSnafu {
+            msg: format!(
+                "decompressed ORC section exceeds {MAX_DECOMPRESSED_SECTION_SIZE}-byte limit"
+            ),
+        }
+        .fail();
+    }
+    Ok(buffer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +456,13 @@ mod tests {
     fn decompressed_block_limit_is_enforced() {
         assert!(ensure_block_limit(MAX_DECOMPRESSED_BLOCK_SIZE).is_ok());
         assert!(ensure_block_limit(MAX_DECOMPRESSED_BLOCK_SIZE + 1).is_err());
+    }
+
+    #[test]
+    fn lzo_is_rejected_before_unbounded_decode() {
+        let mut scratch = Vec::new();
+        let result = Lzo.decompress_block(&[0; 4], &mut scratch);
+        assert!(result.is_err());
+        assert!(scratch.is_empty());
     }
 }
