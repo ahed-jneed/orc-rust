@@ -401,16 +401,22 @@ pub(crate) fn read_decompressed_section(
     bytes: Bytes,
     compression: Option<Compression>,
 ) -> Result<Vec<u8>> {
+    read_decompressed_section_with_limit(bytes, compression, MAX_DECOMPRESSED_SECTION_SIZE)
+}
+
+pub(crate) fn read_decompressed_section_with_limit(
+    bytes: Bytes,
+    compression: Option<Compression>,
+    limit: usize,
+) -> Result<Vec<u8>> {
     let mut buffer = Vec::new();
     Decompressor::new(bytes, compression, vec![])
-        .take((MAX_DECOMPRESSED_SECTION_SIZE + 1) as u64)
+        .take((limit + 1) as u64)
         .read_to_end(&mut buffer)
         .context(error::IoSnafu)?;
-    if buffer.len() > MAX_DECOMPRESSED_SECTION_SIZE {
+    if buffer.len() > limit {
         return error::OutOfSpecSnafu {
-            msg: format!(
-                "decompressed ORC section exceeds {MAX_DECOMPRESSED_SECTION_SIZE}-byte limit"
-            ),
+            msg: format!("decompressed ORC section exceeds {limit}-byte limit"),
         }
         .fail();
     }

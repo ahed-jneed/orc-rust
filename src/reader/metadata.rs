@@ -46,7 +46,9 @@ use prost::Message;
 use snafu::{ensure, OptionExt, ResultExt};
 use std::collections::HashMap;
 
-use crate::compression::{read_decompressed_section, Compression};
+use crate::compression::{
+    read_decompressed_section_with_limit, Compression, MAX_DECOMPRESSED_SECTION_SIZE,
+};
 use crate::error::{self, EmptyFileSnafu, OutOfSpecSnafu, Result};
 use crate::proto::{self, Footer, Metadata, PostScript};
 use crate::schema::RootDataType;
@@ -248,15 +250,22 @@ pub fn read_metadata<R: ChunkReader>(reader: &mut R) -> Result<FileMetadata> {
         tail_bytes
     };
 
-    let footer = deserialize_footer(
+    let (footer, footer_size) = deserialize_footer(
         tail_bytes.slice(tail_bytes.len() - footer_length as usize..),
         compression,
+        MAX_DECOMPRESSED_SECTION_SIZE,
     )?;
     tail_bytes.truncate(tail_bytes.len() - footer_length as usize);
 
-    let metadata = deserialize_footer_metadata(
+    let remaining_limit = MAX_DECOMPRESSED_SECTION_SIZE
+        .checked_sub(footer_size)
+        .context(error::OutOfSpecSnafu {
+            msg: "decompressed ORC footer and metadata exceed the shared limit",
+        })?;
+    let (metadata, _) = deserialize_footer_metadata(
         tail_bytes.slice(tail_bytes.len() - metadata_length as usize..),
         compression,
+        remaining_limit,
     )?;
 
     FileMetadata::from_proto(&postscript, &footer, &metadata)
@@ -340,26 +349,45 @@ pub async fn read_metadata_async<R: super::AsyncChunkReader>(
         tail_bytes
     };
 
-    let footer = deserialize_footer(
+    let (footer, footer_size) = deserialize_footer(
         tail_bytes.slice(tail_bytes.len() - footer_length as usize..),
         compression,
+        MAX_DECOMPRESSED_SECTION_SIZE,
     )?;
     tail_bytes.truncate(tail_bytes.len() - footer_length as usize);
 
-    let metadata = deserialize_footer_metadata(
+    let remaining_limit = MAX_DECOMPRESSED_SECTION_SIZE
+        .checked_sub(footer_size)
+        .context(error::OutOfSpecSnafu {
+            msg: "decompressed ORC footer and metadata exceed the shared limit",
+        })?;
+    let (metadata, _) = deserialize_footer_metadata(
         tail_bytes.slice(tail_bytes.len() - metadata_length as usize..),
         compression,
+        remaining_limit,
     )?;
 
     FileMetadata::from_proto(&postscript, &footer, &metadata)
 }
 
-fn deserialize_footer(bytes: Bytes, compression: Option<Compression>) -> Result<Footer> {
-    let buffer = read_decompressed_section(bytes, compression)?;
-    Footer::decode(buffer.as_slice()).context(error::DecodeProtoSnafu)
+fn deserialize_footer(
+    bytes: Bytes,
+    compression: Option<Compression>,
+    limit: usize,
+) -> Result<(Footer, usize)> {
+    let buffer = read_decompressed_section_with_limit(bytes, compression, limit)?;
+    let size = buffer.len();
+    let footer = Footer::decode(buffer.as_slice()).context(error::DecodeProtoSnafu)?;
+    Ok((footer, size))
 }
 
-fn deserialize_footer_metadata(bytes: Bytes, compression: Option<Compression>) -> Result<Metadata> {
-    let buffer = read_decompressed_section(bytes, compression)?;
-    Metadata::decode(buffer.as_slice()).context(error::DecodeProtoSnafu)
+fn deserialize_footer_metadata(
+    bytes: Bytes,
+    compression: Option<Compression>,
+    limit: usize,
+) -> Result<(Metadata, usize)> {
+    let buffer = read_decompressed_section_with_limit(bytes, compression, limit)?;
+    let size = buffer.len();
+    let metadata = Metadata::decode(buffer.as_slice()).context(error::DecodeProtoSnafu)?;
+    Ok((metadata, size))
 }
