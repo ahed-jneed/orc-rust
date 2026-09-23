@@ -211,9 +211,7 @@ pub fn read_metadata<R: ChunkReader>(reader: &mut R) -> Result<FileMetadata> {
     let footer_length = postscript.footer_length.context(error::OutOfSpecSnafu {
         msg: "Footer length is empty",
     })?;
-    let metadata_length = postscript.metadata_length.context(error::OutOfSpecSnafu {
-        msg: "Metadata length is empty",
-    })?;
+    let metadata_length = postscript.metadata_length.unwrap_or(0);
     let sections_length =
         footer_length
             .checked_add(metadata_length)
@@ -309,9 +307,7 @@ pub async fn read_metadata_async<R: super::AsyncChunkReader>(
     let footer_length = postscript.footer_length.context(error::OutOfSpecSnafu {
         msg: "Footer length is empty",
     })?;
-    let metadata_length = postscript.metadata_length.context(error::OutOfSpecSnafu {
-        msg: "Metadata length is empty",
-    })?;
+    let metadata_length = postscript.metadata_length.unwrap_or(0);
     let sections_length =
         footer_length
             .checked_add(metadata_length)
@@ -428,7 +424,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "orc-rust still requires the PostScript metadataLength"]
     fn an_absent_metadata_length_reads_as_an_empty_metadata_section() {
         let batch = two_rows();
         let rows = ArrowReaderBuilder::try_new(without_metadata_length(&batch))
@@ -441,7 +436,6 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[tokio::test]
-    #[ignore = "orc-rust still requires the PostScript metadataLength"]
     async fn an_absent_metadata_length_reads_as_an_empty_metadata_section_async() {
         use futures_util::TryStreamExt;
 
