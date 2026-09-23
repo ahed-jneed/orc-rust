@@ -391,3 +391,69 @@ fn deserialize_footer_metadata(
     let metadata = Metadata::decode(buffer.as_slice()).context(error::DecodeProtoSnafu)?;
     Ok((metadata, size))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::Int64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+
+    use super::*;
+    use crate::{ArrowReaderBuilder, ArrowWriterBuilder};
+
+    fn two_rows() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![7, 11]))]).unwrap()
+    }
+
+    fn without_metadata_length(batch: &RecordBatch) -> Bytes {
+        let mut file = Vec::new();
+        let mut writer = ArrowWriterBuilder::new(&mut file, batch.schema())
+            .try_build()
+            .unwrap();
+        writer.write(batch).unwrap();
+        writer.close().unwrap();
+
+        let postscript_start = file.len() - 1 - *file.last().unwrap() as usize;
+        let mut postscript = PostScript::decode(&file[postscript_start..file.len() - 1]).unwrap();
+        assert_eq!(postscript.metadata_length, Some(0));
+        postscript.metadata_length = None;
+        let postscript = postscript.encode_to_vec();
+        file.truncate(postscript_start);
+        file.extend_from_slice(&postscript);
+        file.push(postscript.len() as u8);
+        Bytes::from(file)
+    }
+
+    #[test]
+    #[ignore = "orc-rust still requires the PostScript metadataLength"]
+    fn an_absent_metadata_length_reads_as_an_empty_metadata_section() {
+        let batch = two_rows();
+        let rows = ArrowReaderBuilder::try_new(without_metadata_length(&batch))
+            .unwrap()
+            .build()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows, [batch]);
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    #[ignore = "orc-rust still requires the PostScript metadataLength"]
+    async fn an_absent_metadata_length_reads_as_an_empty_metadata_section_async() {
+        use futures_util::TryStreamExt;
+
+        let batch = two_rows();
+        let file = std::io::Cursor::new(without_metadata_length(&batch));
+        let rows = ArrowReaderBuilder::try_new_async(file)
+            .await
+            .unwrap()
+            .build_async()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(rows, [batch]);
+    }
+}
