@@ -65,8 +65,8 @@ pub enum OrcError {
     DecodeTimestamp {
         #[snafu(implicit)]
         location: Location,
-        seconds: i64,
-        nanoseconds: u64,
+        seconds: i128,
+        nanoseconds: i128,
         to_time_unit: TimeUnit,
     },
 

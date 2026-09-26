@@ -565,6 +565,7 @@ impl Compressor {
     pub(crate) fn block_size(&self) -> Option<usize> {
         self.block_size
     }
+}
 
 /// Decompress one metadata/footer section with a cumulative output bound.
 pub(crate) fn read_decompressed_section(
