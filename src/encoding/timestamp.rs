@@ -18,7 +18,6 @@
 use std::marker::PhantomData;
 
 use arrow::datatypes::{ArrowTimestampType, TimeUnit};
-use snafu::ensure;
 
 use crate::{
     encoding::PrimitiveValueDecoder,
@@ -118,19 +117,17 @@ impl PrimitiveValueDecoder<i128> for TimestampNanosecondAsDecimalDecoder {
     }
 }
 
-fn decode(base: i64, seconds_since_orc_base: i64, nanoseconds: i64) -> (i128, i64, u64) {
-    let data = seconds_since_orc_base;
-    // TODO: is this a safe cast?
-    let mut nanoseconds = nanoseconds as u64;
+fn decode(base: i64, seconds_since_orc_base: i64, nanoseconds: i64) -> (i128, i128, i128) {
     // Last 3 bits indicate how many trailing zeros were truncated
     let zeros = nanoseconds & 0x7;
-    nanoseconds >>= 3;
+    // The Apache ORC C++ writer stores the negative fraction pyarrow gives a
+    // pre-1970 timestamp as is, so decode the value as signed, as its reader does
+    let mut nanoseconds = i128::from(nanoseconds >> 3);
     // Multiply by powers of 10 to get back the trailing zeros
-    // TODO: would it be more efficient to unroll this? (if LLVM doesn't already do so)
     if zeros != 0 {
-        nanoseconds *= 10_u64.pow(zeros as u32 + 1);
+        nanoseconds *= 10_i128.pow(zeros as u32 + 1);
     }
-    let seconds_since_epoch = data + base;
+    let seconds_since_epoch = i128::from(seconds_since_orc_base) + i128::from(base);
     // Timestamps below the UNIX epoch with nanoseconds > 999_999 need to be
     // adjusted to have 1 second subtracted due to ORC-763:
     // https://issues.apache.org/jira/browse/ORC-763
@@ -143,8 +140,7 @@ fn decode(base: i64, seconds_since_orc_base: i64, nanoseconds: i64) -> (i128, i6
     // of timestamps
     // The timestamp may overflow i64 as ORC encodes them as a pair of (seconds, nanoseconds)
     // while we encode them as a single i64 of nanoseconds in Arrow.
-    let nanoseconds_since_epoch =
-        (seconds as i128 * NANOSECONDS_IN_SECOND as i128) + (nanoseconds as i128);
+    let nanoseconds_since_epoch = seconds * NANOSECONDS_IN_SECOND as i128 + nanoseconds;
     // Returning seconds & nanoseconds only for error message
     // TODO: does the error message really need those details? Can simplify by removing.
     (nanoseconds_since_epoch, seconds, nanoseconds)
@@ -165,18 +161,8 @@ fn decode_timestamp<T: ArrowTimestampType>(
         TimeUnit::Nanosecond => 1,
     };
 
-    // Error if loss of precision
-    // TODO: make this configurable (e.g. can succeed but truncate)
-    ensure!(
-        nanoseconds_since_epoch % nanoseconds_in_timeunit == 0,
-        DecodeTimestampSnafu {
-            seconds,
-            nanoseconds,
-            to_time_unit: T::UNIT,
-        }
-    );
-
-    // Convert to i64 and error if overflow
+    // Truncate toward zero, as Arrow's cast between timestamp units does, then
+    // convert to i64 and error if overflow
     let num_since_epoch = (nanoseconds_since_epoch / nanoseconds_in_timeunit)
         .try_into()
         .or_else(|_| {
@@ -194,4 +180,47 @@ fn decode_timestamp<T: ArrowTimestampType>(
 fn decode_timestamp_as_i128(base: i64, seconds_since_orc_base: i64, nanoseconds: i64) -> i128 {
     let (nanoseconds_since_epoch, _, _) = decode(base, seconds_since_orc_base, nanoseconds);
     nanoseconds_since_epoch
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow::datatypes::{TimestampMicrosecondType, TimestampNanosecondType};
+
+    use super::*;
+
+    #[test]
+    fn negative_nanoseconds_from_the_cpp_writer_decode_as_signed() {
+        let half_second_before = (-5 << 3) | 7;
+        assert_eq!(
+            decode_timestamp::<TimestampMicrosecondType>(0, -14_182_939, half_second_before)
+                .unwrap(),
+            -14_182_939_500_000
+        );
+        assert_eq!(
+            decode_timestamp::<TimestampMicrosecondType>(0, 0, half_second_before).unwrap(),
+            -500_000
+        );
+    }
+
+    #[test]
+    fn digits_below_the_unit_truncate_toward_zero() {
+        assert_eq!(
+            decode_timestamp::<TimestampMicrosecondType>(0, 1_704_067_200, 123_456_789 << 3)
+                .unwrap(),
+            1_704_067_200_123_456
+        );
+        assert_eq!(
+            decode_timestamp::<TimestampMicrosecondType>(0, -14_182_939, -876_543_211 << 3)
+                .unwrap(),
+            -14_182_939_876_543
+        );
+    }
+
+    #[test]
+    fn out_of_range_values_fail_without_overflowing() {
+        for value in [i64::MIN, i64::MAX] {
+            assert!(decode_timestamp::<TimestampNanosecondType>(value, value, value).is_err());
+            assert!(decode_timestamp::<TimestampMicrosecondType>(value, value, value).is_err());
+        }
+    }
 }
