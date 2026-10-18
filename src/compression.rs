@@ -25,7 +25,7 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use fallible_streaming_iterator::FallibleStreamingIterator;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 
 use crate::error::{self, OrcError, Result};
 use crate::proto::{self, CompressionKind};
@@ -279,15 +279,33 @@ impl FallibleStreamingIterator for DecompressorIter {
 
         match &self.compression {
             Some(compression) => {
+                ensure!(
+                    self.stream.len() >= 3,
+                    error::OutOfSpecSnafu {
+                        msg: "Compressed stream ends inside a block header",
+                    }
+                );
                 // TODO: take stratch from current State::Compressed for re-use
                 let header = self.stream.split_to(3);
                 let header = [header[0], header[1], header[2]];
                 match CompressionHeader::decode(header) {
                     CompressionHeader::Original(length) => {
+                        ensure!(
+                            length as usize <= self.stream.len(),
+                            error::OutOfSpecSnafu {
+                                msg: "Compressed stream ends inside an original block",
+                            }
+                        );
                         let original = self.stream.split_to(length as usize);
                         self.current = Some(State::Original(original.into()));
                     }
                     CompressionHeader::Compressed(length) => {
+                        ensure!(
+                            length as usize <= self.stream.len(),
+                            error::OutOfSpecSnafu {
+                                msg: "Compressed stream ends inside a compressed block",
+                            }
+                        );
                         let compressed = self.stream.split_to(length as usize);
                         compression.decompress_block(&compressed, &mut self.scratch)?;
                         self.current = Some(State::Compressed(std::mem::take(&mut self.scratch)));
@@ -340,16 +358,20 @@ impl Decompressor {
     }
 }
 
+fn invalid_data(error: OrcError) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+}
+
 impl std::io::Read for Decompressor {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.is_first {
             self.is_first = false;
-            self.decompressor.advance().unwrap();
+            self.decompressor.advance().map_err(invalid_data)?;
         }
         let current = self.decompressor.get();
         let current = if let Some(current) = current {
             if current.len() == self.offset {
-                self.decompressor.advance().unwrap();
+                self.decompressor.advance().map_err(invalid_data)?;
                 self.offset = 0;
                 let current = self.decompressor.get();
                 if let Some(current) = current {
@@ -520,6 +542,34 @@ impl Compressor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn zlib() -> Option<Compression> {
+        Compression::from_proto(CompressionKind::Zlib, None)
+    }
+
+    fn read_all(stream: Vec<u8>) -> std::io::Result<Vec<u8>> {
+        let mut output = Vec::new();
+        Decompressor::new(Bytes::from(stream), zlib(), vec![])
+            .read_to_end(&mut output)
+            .map(|_| output)
+    }
+
+    #[test]
+    fn a_stream_ending_inside_a_block_header_is_an_error() {
+        assert!(read_all(vec![0x00, 0x00]).is_err());
+    }
+
+    #[test]
+    fn a_block_longer_than_the_stream_is_an_error() {
+        for header in [
+            CompressionHeader::Original(100),
+            CompressionHeader::Compressed(100),
+        ] {
+            let mut stream = header.encode().to_vec();
+            stream.push(1);
+            assert!(read_all(stream).is_err());
+        }
+    }
 
     #[test]
     fn compression_header_roundtrip() {

@@ -19,7 +19,7 @@ use std::{collections::HashMap, io::Read, sync::Arc};
 
 use bytes::Bytes;
 use prost::Message;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::{
     column::Column,
@@ -78,6 +78,15 @@ impl StripeMetadata {
     pub fn footer_offset(&self) -> u64 {
         self.offset + self.index_length + self.data_length
     }
+
+    fn checked_footer_offset(&self) -> Result<u64> {
+        self.offset
+            .checked_add(self.index_length)
+            .and_then(|offset| offset.checked_add(self.data_length))
+            .context(error::OutOfSpecSnafu {
+                msg: "Stripe footer offset overflows",
+            })
+    }
 }
 
 impl TryFrom<(&proto::StripeInformation, &proto::StripeStatistics)> for StripeMetadata {
@@ -132,7 +141,7 @@ impl Stripe {
         info: &StripeMetadata,
     ) -> Result<Self> {
         let footer = reader
-            .get_bytes(info.footer_offset(), info.footer_length())
+            .get_bytes(info.checked_footer_offset()?, info.footer_length())
             .context(IoSnafu)?;
         let footer = Arc::new(deserialize_stripe_footer(
             footer,
@@ -161,14 +170,14 @@ impl Stripe {
                 let data = reader.get_bytes(stream_offset, length).context(IoSnafu)?;
                 stream_map.insert((column_id, kind), data);
             }
-            stream_offset += length;
+            stream_offset = stream_offset
+                .checked_add(length)
+                .context(error::OutOfSpecSnafu {
+                    msg: "Stripe stream offsets overflow",
+                })?;
         }
 
-        let tz = footer
-            .writer_timezone
-            .as_ref()
-            // TODO: make this return error
-            .map(|a| a.parse::<chrono_tz::Tz>().unwrap());
+        let tz = parse_writer_timezone(&footer)?;
 
         Ok(Self {
             columns,
@@ -176,7 +185,7 @@ impl Stripe {
                 inner: stream_map,
                 compression: file_metadata.compression(),
             },
-            number_of_rows: info.number_of_rows() as usize,
+            number_of_rows: stripe_row_count(info)?,
             tz,
         })
     }
@@ -190,7 +199,7 @@ impl Stripe {
         info: &StripeMetadata,
     ) -> Result<Self> {
         let footer = reader
-            .get_bytes(info.footer_offset(), info.footer_length())
+            .get_bytes(info.checked_footer_offset()?, info.footer_length())
             .await
             .context(IoSnafu)?;
         let footer = Arc::new(deserialize_stripe_footer(
@@ -224,14 +233,14 @@ impl Stripe {
                 stream_map.insert((column_id, kind), data);
             }
 
-            stream_offset += length;
+            stream_offset = stream_offset
+                .checked_add(length)
+                .context(error::OutOfSpecSnafu {
+                    msg: "Stripe stream offsets overflow",
+                })?;
         }
 
-        let tz = footer
-            .writer_timezone
-            .as_ref()
-            // TODO: make this return error
-            .map(|a| a.parse::<chrono_tz::Tz>().unwrap());
+        let tz = parse_writer_timezone(&footer)?;
 
         Ok(Self {
             columns,
@@ -239,7 +248,7 @@ impl Stripe {
                 inner: stream_map,
                 compression: file_metadata.compression(),
             },
-            number_of_rows: info.number_of_rows() as usize,
+            number_of_rows: stripe_row_count(info)?,
             tz,
         })
     }
@@ -335,6 +344,28 @@ impl StreamMap {
     }
 }
 
+fn parse_writer_timezone(footer: &StripeFooter) -> Result<Option<chrono_tz::Tz>> {
+    footer
+        .writer_timezone
+        .as_ref()
+        .map(|tz| {
+            tz.parse::<chrono_tz::Tz>()
+                .ok()
+                .context(error::OutOfSpecSnafu {
+                    msg: format!("Invalid writer timezone '{tz}'"),
+                })
+        })
+        .transpose()
+}
+
+fn stripe_row_count(info: &StripeMetadata) -> Result<usize> {
+    usize::try_from(info.number_of_rows())
+        .ok()
+        .context(error::OutOfSpecSnafu {
+            msg: "Stripe row count does not fit in usize",
+        })
+}
+
 fn deserialize_stripe_footer(
     bytes: Bytes,
     compression: Option<Compression>,
@@ -344,4 +375,30 @@ fn deserialize_stripe_footer(
         .read_to_end(&mut buffer)
         .context(error::IoSnafu)?;
     StripeFooter::decode(buffer.as_slice()).context(error::DecodeProtoSnafu)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unknown_writer_timezone_is_an_error() {
+        let footer = StripeFooter {
+            writer_timezone: Some("Not/A_Zone".to_string()),
+            ..Default::default()
+        };
+        assert!(parse_writer_timezone(&footer).is_err());
+    }
+
+    #[test]
+    fn a_known_writer_timezone_parses() {
+        let footer = StripeFooter {
+            writer_timezone: Some("America/Los_Angeles".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_writer_timezone(&footer).unwrap(),
+            Some(chrono_tz::America::Los_Angeles)
+        );
+    }
 }

@@ -35,7 +35,7 @@ use crate::proto::column_encoding::Kind as ColumnEncodingKind;
 use crate::proto::stream::Kind;
 use crate::stripe::Stripe;
 
-use super::{ArrayBatchDecoder, Int64ArrayDecoder, PresentDecoder};
+use super::{checked_total_length, ArrayBatchDecoder, Int64ArrayDecoder, PresentDecoder};
 
 // TODO: reduce duplication with string below
 pub fn new_binary_decoder(column: &Column, stripe: &Stripe) -> Result<Box<dyn ArrayBatchDecoder>> {
@@ -122,17 +122,17 @@ impl<T: ByteArrayType> GenericByteArrayDecoder<T> {
         } else {
             self.lengths.decode(&mut lengths)?;
         }
-        let total_length: i64 = lengths.iter().sum();
+        let total_length = checked_total_length(&lengths, "string/binary data")?;
         ensure!(
-            total_length <= i32::MAX as i64,
+            total_length <= i32::MAX as usize,
             OffsetOverflowSnafu {
-                total_length,
+                total_length: total_length as i64,
                 max_size: i32::MAX,
                 batch_size,
             }
         );
         // Fetch all data bytes at once
-        let mut bytes = Vec::with_capacity(total_length as usize);
+        let mut bytes = Vec::with_capacity(total_length);
         self.bytes
             .by_ref()
             .take(total_length as u64)
@@ -173,7 +173,7 @@ impl<T: ByteArrayType> ArrayBatchDecoder for GenericByteArrayDecoder<T> {
         // Decode lengths to determine how many bytes to skip
         let mut lengths = vec![0; non_null_count];
         self.lengths.decode(&mut lengths)?;
-        let total_bytes: i64 = lengths.iter().sum();
+        let total_bytes = checked_total_length(&lengths, "string/binary data")?;
 
         // Skip the data bytes
         // TODO: can we use the decompressor to skip the bytes?

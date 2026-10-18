@@ -26,7 +26,7 @@ use arrow::datatypes::{
     Date32Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, SchemaRef,
 };
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::column::Column;
 use crate::encoding::boolean::BooleanDecoder;
@@ -387,6 +387,19 @@ impl Iterator for NaiveStripeDecoder {
     }
 }
 
+pub(crate) fn checked_total_length(lengths: &[i64], description: &str) -> Result<usize> {
+    lengths.iter().try_fold(0usize, |total, &length| {
+        let length = usize::try_from(length)
+            .ok()
+            .context(error::OutOfSpecSnafu {
+                msg: format!("Negative {description} length"),
+            })?;
+        total.checked_add(length).context(error::OutOfSpecSnafu {
+            msg: format!("{description} lengths overflow"),
+        })
+    })
+}
+
 pub fn array_decoder_factory(
     column: &Column,
     hinted_arrow_type: &ArrowDataType,
@@ -601,5 +614,21 @@ impl NaiveStripeDecoder {
             decoder.skip_values(count, None)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_total_length;
+
+    #[test]
+    fn total_length_sums_non_negative_lengths() {
+        assert_eq!(checked_total_length(&[1, 2, 3], "list element").unwrap(), 6);
+    }
+
+    #[test]
+    fn total_length_rejects_negative_and_overflowing_lengths() {
+        assert!(checked_total_length(&[1, -1], "list element").is_err());
+        assert!(checked_total_length(&[i64::MAX, i64::MAX, i64::MAX], "list element").is_err());
     }
 }

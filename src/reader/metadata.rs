@@ -215,12 +215,30 @@ pub fn read_metadata<R: ChunkReader>(reader: &mut R) -> Result<FileMetadata> {
         msg: "Metadata length is empty",
     })?;
 
+    let sections_length =
+        footer_length
+            .checked_add(metadata_length)
+            .context(error::OutOfSpecSnafu {
+                msg: "Footer and metadata lengths overflow",
+            })?;
+    // -1 is the postscript length byte
+    let sections_end = file_len
+        .checked_sub(1 + postscript_len)
+        .context(error::OutOfSpecSnafu {
+            msg: "Postscript extends past the start of the file",
+        })?;
+    ensure!(
+        sections_length <= sections_end,
+        OutOfSpecSnafu {
+            msg: "Footer and metadata extend past the start of the file"
+        }
+    );
+
     // Ensure we have enough bytes for Footer and Metadata
-    let mut tail_bytes = if footer_length + metadata_length > tail_bytes.len() as u64 {
+    let mut tail_bytes = if sections_length > tail_bytes.len() as u64 {
         // Need second read
-        // -1 is the postscript length byte
-        let offset = file_len - 1 - postscript_len - footer_length - metadata_length;
-        let bytes_to_read = (footer_length + metadata_length) - tail_bytes.len() as u64;
+        let offset = sections_end - sections_length;
+        let bytes_to_read = sections_length - tail_bytes.len() as u64;
         let prepend_bytes = reader
             .get_bytes(offset, bytes_to_read)
             .context(error::IoSnafu)?;
@@ -288,12 +306,30 @@ pub async fn read_metadata_async<R: super::AsyncChunkReader>(
         msg: "Metadata length is empty",
     })?;
 
+    let sections_length =
+        footer_length
+            .checked_add(metadata_length)
+            .context(error::OutOfSpecSnafu {
+                msg: "Footer and metadata lengths overflow",
+            })?;
+    // -1 is the postscript length byte
+    let sections_end = file_len
+        .checked_sub(1 + postscript_len)
+        .context(error::OutOfSpecSnafu {
+            msg: "Postscript extends past the start of the file",
+        })?;
+    ensure!(
+        sections_length <= sections_end,
+        OutOfSpecSnafu {
+            msg: "Footer and metadata extend past the start of the file"
+        }
+    );
+
     // Ensure we have enough bytes for Footer and Metadata
-    let mut tail_bytes = if footer_length + metadata_length > tail_bytes.len() as u64 {
+    let mut tail_bytes = if sections_length > tail_bytes.len() as u64 {
         // Need second read
-        // -1 is the postscript length byte
-        let offset = file_len - 1 - postscript_len - footer_length - metadata_length;
-        let bytes_to_read = (footer_length + metadata_length) - tail_bytes.len() as u64;
+        let offset = sections_end - sections_length;
+        let bytes_to_read = sections_length - tail_bytes.len() as u64;
         let prepend_bytes = reader
             .get_bytes(offset, bytes_to_read)
             .await
