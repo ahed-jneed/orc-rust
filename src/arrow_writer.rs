@@ -607,7 +607,7 @@ mod tests {
         let stripes = builder.file_metadata().stripe_metadatas();
         assert_eq!(stripes.len(), 2);
         for stripe in stripes {
-            let footer_start = stripe.footer_offset() as usize;
+            let footer_start = stripe.footer_offset().unwrap() as usize;
             let footer_end = footer_start + stripe.footer_length() as usize;
             let mut decoded_footer = Vec::new();
             Decompressor::new(
@@ -963,7 +963,7 @@ mod tests {
         }
 
         for stripe in stripes {
-            let footer_start = stripe.footer_offset() as usize;
+            let footer_start = stripe.footer_offset().unwrap() as usize;
             let footer_end = footer_start + stripe.footer_length() as usize;
             let mut decoded_footer = Vec::new();
             Decompressor::new(
