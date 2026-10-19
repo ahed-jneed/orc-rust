@@ -19,9 +19,6 @@
 
 use std::{io::Read, marker::PhantomData, ops::RangeInclusive};
 
-use bytes::{BufMut, BytesMut};
-use snafu::OptionExt;
-
 use crate::{
     encoding::{
         rle::GenericRle,
@@ -31,6 +28,7 @@ use crate::{
     error::{OutOfSpecSnafu, Result},
     memory::EstimateMemory,
 };
+use bytes::{BufMut, BytesMut};
 
 use super::{
     util::{read_varint_zigzagged, write_varint_zigzagged},
@@ -106,27 +104,11 @@ fn read_run<N: NInt, R: Read, S: EncodingSign>(
     delta: i8,
 ) -> Result<()> {
     let mut base = read_varint_zigzagged::<_, _, S>(reader)?;
-    // Account for base value
-    let length = length - 1;
+    let delta = N::from_i64(delta as i64);
     out_ints.push(base);
-    if delta < 0 {
-        let delta = delta.unsigned_abs();
-        let delta = N::from_u8(delta);
-        for _ in 0..length {
-            base = base.checked_sub(&delta).context(OutOfSpecSnafu {
-                msg: "over/underflow when decoding patched base integer",
-            })?;
-            out_ints.push(base);
-        }
-    } else {
-        let delta = delta as u8;
-        let delta = N::from_u8(delta);
-        for _ in 0..length {
-            base = base.checked_add(&delta).context(OutOfSpecSnafu {
-                msg: "over/underflow when decoding patched base integer",
-            })?;
-            out_ints.push(base);
-        }
+    for _ in 1..length {
+        base = base.wrapping_add(&delta);
+        out_ints.push(base);
     }
     Ok(())
 }
