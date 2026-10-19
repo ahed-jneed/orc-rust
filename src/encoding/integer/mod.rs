@@ -304,3 +304,19 @@ impl NInt for i64 {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    #[test]
+    fn test_read_big_endian_byte_size_exceeds_integer() {
+        let mut reader = Cursor::new(vec![0; 16]);
+        assert!(i16::read_big_endian(&mut reader, 3).is_err());
+        assert!(i32::read_big_endian(&mut reader, 5).is_err());
+        assert!(i64::read_big_endian(&mut reader, 9).is_err());
+        assert_eq!(i16::read_big_endian(&mut reader, 2).unwrap(), 0);
+    }
+}

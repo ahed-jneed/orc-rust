@@ -983,7 +983,8 @@ mod tests {
     #[test]
     fn test_delta_single_value_with_delta_width() {
         let stream = [0b_1100_0010, 0, 0, 0];
-        assert!(decode_all::<i64>(&stream, 1).is_err());
+        let err = decode_all::<i64>(&stream, 1).unwrap_err();
+        assert!(err.to_string().contains("length of at least 2"), "{err}");
     }
 
     #[test]
@@ -991,6 +992,7 @@ mod tests {
         let mut stream = vec![0b_1100_0000, 1, 0];
         stream.extend([0xFF; 9]);
         stream.push(1);
-        assert!(decode_all::<i64>(&stream, 2).is_err());
+        let err = decode_all::<i64>(&stream, 2).unwrap_err();
+        assert!(err.to_string().contains("cannot be i64::MIN"), "{err}");
     }
 }
