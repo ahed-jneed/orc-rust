@@ -38,6 +38,7 @@ mod decimal_unspecified;
 mod decimal_unspecified_scale;
 mod empty_struct;
 mod misc;
+mod null_matrix;
 mod rle_v1_wrapping;
 mod schema_snapshot;
 mod stripe_consistency;
