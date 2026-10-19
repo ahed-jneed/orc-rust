@@ -33,6 +33,7 @@ use orc_rust::TimestampPrecision;
 
 mod decimal64;
 mod misc;
+mod rle_v1_wrapping;
 mod timestamp_secondary;
 
 fn new_arrow_reader(path: &str, fields: &[&str]) -> ArrowReader<File> {

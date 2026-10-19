@@ -414,7 +414,10 @@ impl<N: NInt, S: EncodingSign> PrimitiveValueEncoder<N> for RleV1Encoder<N, S> {
 mod tests {
     use std::io::Cursor;
 
-    use crate::encoding::{integer::UnsignedEncoding, PrimitiveValueDecoder};
+    use crate::encoding::{
+        integer::{SignedEncoding, UnsignedEncoding},
+        PrimitiveValueDecoder,
+    };
 
     use super::*;
 
@@ -546,5 +549,67 @@ mod tests {
         assert_eq!(batch, vec![50, 49, 48, 47, 46, 45, 44, 43, 42, 41]);
 
         Ok(())
+    }
+
+    fn decode_all<N: NInt>(encoded: &[u8], n: usize) -> Result<Vec<N>> {
+        let mut decoder = RleV1Decoder::<N, _, SignedEncoding>::new(Cursor::new(encoded));
+        let mut out = vec![N::zero(); n];
+        decoder.decode(&mut out)?;
+        Ok(out)
+    }
+
+    #[test]
+    fn test_run_wraps_i64_downwards() -> Result<()> {
+        let encoded = [
+            0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+        ];
+        let expected = [i64::MIN, i64::MAX, i64::MAX - 1];
+        assert_eq!(decode_all::<i64>(&encoded, 3)?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_wraps_i64_upwards() -> Result<()> {
+        let encoded = [
+            0x00, 0x02, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+        ];
+        let expected = [i64::MAX, i64::MIN + 1, i64::MIN + 3];
+        assert_eq!(decode_all::<i64>(&encoded, 3)?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_wraps_i64_for_each_skip() -> Result<()> {
+        let encoded = [
+            0x04, 0x7f, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+        ];
+        let expected: Vec<i64> = (0..7).map(|i| i64::MAX.wrapping_add(127 * i)).collect();
+        assert_eq!(decode_all::<i64>(&encoded, 7)?, expected);
+        for skip in 0..7 {
+            let mut decoder =
+                RleV1Decoder::<i64, _, SignedEncoding>::new(Cursor::new(&encoded[..]));
+            decoder.skip(skip)?;
+            let mut out = vec![0; 7 - skip];
+            decoder.decode(&mut out)?;
+            assert_eq!(out, expected[skip..]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_wraps_i32_and_i16() -> Result<()> {
+        let encoded = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0x0f];
+        let expected = [i32::MIN, i32::MAX, i32::MAX - 1];
+        assert_eq!(decode_all::<i32>(&encoded, 3)?, expected);
+        let encoded = [0x00, 0xff, 0xff, 0xff, 0x03];
+        let expected = [i16::MIN, i16::MAX, i16::MAX - 1];
+        assert_eq!(decode_all::<i16>(&encoded, 3)?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_truncated_run_does_not_mention_patched_base() {
+        let err = decode_all::<i64>(&[0x00, 0xff], 3).unwrap_err();
+        assert!(!err.to_string().contains("patched base"), "{err}");
     }
 }
