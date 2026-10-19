@@ -15,9 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::fs::File;
+use std::fs::{self, File};
+use std::path::Path;
+use std::sync::Arc;
 
-use arrow::array::{Array, TimestampNanosecondArray};
+use arrow::array::{Array, Int64Array, TimestampNanosecondArray};
+use arrow::compute::cast;
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDateTime;
 use orc_rust::arrow_reader::ArrowReaderBuilder;
@@ -100,4 +104,82 @@ fn timestamp_mixed_whole_and_fractional_seconds() {
             );
         }
     }
+}
+
+fn read_unit(
+    path: &Path,
+    batch_size: usize,
+    time_unit: TimeUnit,
+    time_zone: Option<&str>,
+) -> Vec<Option<i64>> {
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "t",
+        DataType::Timestamp(time_unit, time_zone.map(Into::into)),
+        true,
+    )]));
+    let batches = ArrowReaderBuilder::try_new(File::open(path).unwrap())
+        .unwrap()
+        .with_schema(schema)
+        .with_batch_size(batch_size)
+        .build()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    batches
+        .iter()
+        .flat_map(|batch| {
+            let array = cast(batch.column(0), &DataType::Int64).unwrap();
+            let array = array.as_any().downcast_ref::<Int64Array>().unwrap();
+            (0..array.len())
+                .map(|i| array.is_valid(i).then(|| array.value(i)))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn check_property_dir(dir: &Path, batch_sizes: &[usize]) -> usize {
+    let mut files: Vec<_> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "orc"))
+        .collect();
+    files.sort();
+    for path in &files {
+        let expected = fs::read_to_string(path.with_extension("expected")).unwrap();
+        let mut lines = expected.lines();
+        let (unit, zone) = lines.next().unwrap().split_once(' ').unwrap();
+        let time_unit = match unit {
+            "ns" => TimeUnit::Nanosecond,
+            "us" => TimeUnit::Microsecond,
+            other => panic!("unknown unit {other}"),
+        };
+        let time_zone = (zone == "utc").then_some("UTC");
+        let expected: Vec<Option<i64>> = lines
+            .map(|line| (line != "null").then(|| line.parse().unwrap()))
+            .collect();
+        for &batch_size in batch_sizes {
+            let actual = read_unit(path, batch_size, time_unit.clone(), time_zone);
+            assert_eq!(actual.len(), expected.len(), "{path:?} batch {batch_size}");
+            if let Some(row) = (0..actual.len()).find(|&i| actual[i] != expected[i]) {
+                panic!(
+                    "{path:?} batch {batch_size} row {row}: {:?} != {:?}",
+                    actual[row], expected[row]
+                );
+            }
+        }
+    }
+    files.len()
+}
+
+#[test]
+fn timestamp_property_fixtures() {
+    let dir = Path::new(&basic_path("timestamp_property")).to_path_buf();
+    assert!(check_property_dir(&dir, &[1, 3, 8192]) >= 10);
+}
+
+#[test]
+#[ignore = "requires ORC_TIMESTAMP_PROPERTY_DIR from scripts/generate_orc_timestamp_property.py"]
+fn timestamp_property_generated() {
+    let dir = std::env::var("ORC_TIMESTAMP_PROPERTY_DIR").unwrap();
+    let files = check_property_dir(Path::new(&dir), &[8192, 777]);
+    assert!(files >= 600, "only {files} files");
 }
