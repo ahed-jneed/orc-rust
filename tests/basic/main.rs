@@ -39,6 +39,7 @@ mod decimal_unspecified_scale;
 mod empty_struct;
 mod misc;
 mod null_matrix;
+mod real_writers;
 mod rle_v1_wrapping;
 mod schema_snapshot;
 mod stripe_consistency;

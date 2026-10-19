@@ -20,8 +20,7 @@ output directory. `diff` counts mutants that decoded without error to different 
 than the seed.
 
 The driver refuses to start when a seed does not decode: every `ok` mutant of such a seed
-would otherwise count as `diff`. The seeds have no null rows at the top level (a null row
-of the root struct makes the reader fail on some files).
+would otherwise count as `diff`.
 
 The summary also prints `CLASS <region> <status>: <n>` lines, the mutants per byte region
 (`magic`, `postscript`, `metadata`, `footer`, `stripe_index`, `stripe_data_plain`,
