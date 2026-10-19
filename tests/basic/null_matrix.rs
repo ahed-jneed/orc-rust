@@ -276,13 +276,11 @@ macro_rules! null_matrix_tests {
     ($($name:ident, $selection:ident: [$($file:expr),+ $(,)?]);+ $(;)?) => {
         $(
             #[test]
-            #[ignore = "the PRESENT stream of the root struct is not applied to its children"]
             fn $name() {
                 $(check_file($file);)+
             }
 
             #[test]
-            #[ignore = "the PRESENT stream of the root struct is not applied to its children"]
             fn $selection() {
                 $(check_file_selections($file);)+
             }
@@ -322,7 +320,6 @@ null_matrix_tests! {
 }
 
 #[test]
-#[ignore = "the PRESENT stream of the root struct is not applied to its children"]
 fn null_matrix_root_null_rows_keep_the_values_of_the_others() {
     let path = data_path("root_null_int");
     for batch_size in BATCH_SIZES {

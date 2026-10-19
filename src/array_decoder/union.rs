@@ -65,12 +65,14 @@ impl UnionArrayDecoder {
     }
 }
 
-impl ArrayBatchDecoder for UnionArrayDecoder {
-    fn next_batch(
+impl UnionArrayDecoder {
+    /// Decode the tags of the next `batch_size` values and work out, for every variant,
+    /// which of the values are its own.
+    fn next_tags(
         &mut self,
         batch_size: usize,
         parent_present: Option<&NullBuffer>,
-    ) -> Result<ArrayRef> {
+    ) -> Result<(Vec<i8>, Vec<NullBuffer>)> {
         let present =
             derive_present_vec(&mut self.present, parent_present, batch_size).transpose()?;
         let mut tags = vec![0; batch_size];
@@ -117,18 +119,31 @@ impl ArrayBatchDecoder for UnionArrayDecoder {
             }
         }
 
+        let children_nullability = children_nullability
+            .into_iter()
+            .map(|mut present| NullBuffer::from(present.finish()))
+            .collect();
+        Ok((tags, children_nullability))
+    }
+}
+
+impl ArrayBatchDecoder for UnionArrayDecoder {
+    fn next_batch(
+        &mut self,
+        batch_size: usize,
+        parent_present: Option<&NullBuffer>,
+    ) -> Result<ArrayRef> {
+        let (tags, children_nullability) = self.next_tags(batch_size, parent_present)?;
+
         let child_arrays = self
             .variants
             .iter_mut()
             .zip(children_nullability)
-            .map(|(decoder, mut present)| {
-                let present = NullBuffer::from(present.finish());
-                decoder.next_batch(batch_size, Some(&present))
-            })
+            .map(|(decoder, present)| decoder.next_batch(batch_size, Some(&present)))
             .collect::<Result<Vec<_>>>()?;
 
         // Currently default to decoding as Sparse UnionArray so no value offsets
-        let type_ids = Buffer::from_vec(tags.clone()).into();
+        let type_ids = Buffer::from_vec(tags).into();
         let array = UnionArray::try_new(self.fields.clone(), type_ids, None, child_arrays)
             .context(ArrowSnafu)?;
         let array = Arc::new(array);
@@ -136,26 +151,10 @@ impl ArrayBatchDecoder for UnionArrayDecoder {
     }
 
     fn skip_values(&mut self, n: usize, parent_present: Option<&NullBuffer>) -> Result<()> {
-        use super::derive_present_vec;
-
-        // Derive the combined present buffer like in next_batch
-        let present = derive_present_vec(&mut self.present, parent_present, n).transpose()?;
-
-        // Determine how many non-null values we need to skip from tags stream
-        let non_null_count = if let Some(present) = &present {
-            present.len() - present.null_count()
-        } else {
-            n
-        };
-
-        // Skip tags (only non-null values have tags)
-        self.tags.skip(non_null_count)?;
-
-        // Skip values in all variant decoders
-        // For sparse union, each variant stores n values regardless of which variant is active
-        // Pass the present buffer to children
-        for decoder in &mut self.variants {
-            decoder.skip_values(n, present.as_ref())?;
+        // The tags say how many values each variant has to skip
+        let (_, children_nullability) = self.next_tags(n, parent_present)?;
+        for (decoder, present) in self.variants.iter_mut().zip(children_nullability) {
+            decoder.skip_values(n, Some(&present))?;
         }
 
         Ok(())

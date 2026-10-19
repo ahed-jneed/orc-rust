@@ -399,8 +399,15 @@ impl StreamMap {
     }
 
     pub fn get_opt(&self, column: &Column, kind: Kind) -> Option<Decompressor> {
-        let column_id = column.column_id();
+        self.get_by_id(column.column_id(), kind)
+    }
 
+    /// The PRESENT stream of the root struct, which says which rows of the file are null.
+    pub fn root_present(&self) -> Option<Decompressor> {
+        self.get_by_id(0, Kind::Present)
+    }
+
+    fn get_by_id(&self, column_id: u32, kind: Kind) -> Option<Decompressor> {
         self.inner
             .get(&(column_id, kind))
             .cloned()
