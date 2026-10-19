@@ -1671,3 +1671,41 @@ fn test_every_singular_field_of_the_metadata_messages_is_checked() {
     file.stripes[0].footer_appends = vec![(None, twice(3, Some(b"x")))];
     rejects(file, "field 3 of a stripe footer");
 }
+
+#[test]
+fn test_stripe_overlapping_the_previous_one_by_a_byte_is_refused() {
+    let file = two_stripes().render_with(|footer, _| {
+        let end = footer.stripes[0].offset()
+            + footer.stripes[0].index_length()
+            + footer.stripes[0].data_length()
+            + footer.stripes[0].footer_length();
+        footer.stripes[1].offset = Some(end - 1);
+    });
+    assert_refused(file, "Stripe 1 starts at");
+}
+
+#[test]
+fn test_stripe_ending_a_byte_beyond_the_file_tail_is_refused() {
+    let file = two_stripes().render_with(|footer, _| {
+        footer.stripes[1].footer_length = Some(footer.stripes[1].footer_length() + 1);
+    });
+    assert_refused(file, "Stripe 1 ends at");
+}
+
+#[test]
+fn test_more_statistics_than_columns_are_refused() {
+    let mut statistics = typed_statistics();
+    statistics.push(statistics[0].clone());
+    assert_refused(
+        statistics_file(statistics),
+        "4 column statistics for 3 columns",
+    );
+}
+
+#[test]
+fn test_index_stream_longer_than_declared_is_refused() {
+    let mut file = stride_file(Some(2), 3, 0);
+    let length = file.stripes[0].footer.streams[0].length();
+    file.stripes[0].footer.streams[0].length = Some(length + 1);
+    assert_refused(file.render(), "stripe footer streams hold");
+}
