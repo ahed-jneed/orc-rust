@@ -23,9 +23,10 @@ use orc_rust::proto::column_encoding::Kind as EncodingKind;
 use orc_rust::proto::r#type::Kind as TypeKind;
 use orc_rust::proto::stream::Kind;
 use orc_rust::proto::{
-    BloomFilter, BloomFilterIndex, ColumnEncoding, ColumnStatistics, CompressionKind, Footer,
-    IntegerStatistics, PostScript, RowIndex, RowIndexEntry, Stream, StripeFooter,
-    StripeInformation, Type,
+    BloomFilter, BloomFilterIndex, BucketStatistics, ColumnEncoding, ColumnStatistics,
+    CompressionKind, Encryption, Footer, IntegerStatistics, Metadata, PostScript, RowIndex,
+    RowIndexEntry, Stream, StringStatistics, StripeFooter, StripeInformation, StripeStatistics,
+    Type,
 };
 use orc_rust::stripe::Stripe;
 use prost::Message;
@@ -153,6 +154,9 @@ struct OrcFile {
     row_index_stride: Option<u32>,
     compression: CompressionKind,
     block_size: Option<u64>,
+    stripe_padding: usize,
+    trailing: Vec<u8>,
+    stripe_statistics: Vec<StripeStatistics>,
 }
 
 impl OrcFile {
@@ -163,6 +167,9 @@ impl OrcFile {
             row_index_stride: None,
             compression: CompressionKind::None,
             block_size: None,
+            stripe_padding: 0,
+            trailing: vec![],
+            stripe_statistics: vec![],
         }
     }
 
@@ -187,7 +194,10 @@ impl OrcFile {
             row_index_stride: self.row_index_stride,
             ..Default::default()
         };
-        for spec in &self.stripes {
+        for (index, spec) in self.stripes.iter().enumerate() {
+            if index > 0 {
+                file.resize(file.len() + self.stripe_padding, 0);
+            }
             let offset = file.len() as u64;
             file.extend_from_slice(&spec.body);
             let stripe_footer = self.section(spec.footer.encode_to_vec());
@@ -201,13 +211,21 @@ impl OrcFile {
                 ..Default::default()
             });
         }
+        file.extend_from_slice(&self.trailing);
         footer.content_length = Some(file.len() as u64 - MAGIC_LENGTH);
         footer.number_of_rows = Some(self.stripes.iter().map(|spec| spec.rows).sum());
+        let metadata = self.section(
+            Metadata {
+                stripe_stats: self.stripe_statistics.clone(),
+            }
+            .encode_to_vec(),
+        );
+        file.extend_from_slice(&metadata);
         let mut postscript = PostScript {
             compression: Some(self.compression as i32),
             compression_block_size: self.block_size,
             version: vec![0, 12],
-            metadata_length: Some(0),
+            metadata_length: Some(metadata.len() as u64),
             magic: Some("ORC".to_string()),
             ..Default::default()
         };
@@ -437,7 +455,7 @@ fn test_stream_of_a_column_beyond_the_type_tree_is_refused() {
 fn test_stream_of_unknown_kind_is_refused() {
     let mut file = two_stripes();
     file.stripes[0].footer.streams[0].kind = Some(77);
-    assert_refused(file.render(), "column 1 has a stream of unknown kind 77");
+    assert_refused(file.render(), "column 1 has a stream of no known kind");
 }
 
 #[test]
@@ -445,7 +463,7 @@ fn test_stream_of_unknown_kind_is_refused() {
 fn test_encoding_of_unknown_kind_is_refused() {
     let mut file = two_stripes();
     file.stripes[0].footer.columns[1].kind = Some(9);
-    assert_refused(file.render(), "column 1 has unknown encoding kind 9");
+    assert_refused(file.render(), "column 1 has no known encoding kind");
 }
 
 #[test]
@@ -894,4 +912,193 @@ async fn test_async_reader_refuses_stream_lengths_that_do_not_add_up() {
         error.to_string().contains("stripe footer streams hold"),
         "{error}"
     );
+}
+
+fn typed_statistics() -> Vec<ColumnStatistics> {
+    vec![
+        ColumnStatistics {
+            number_of_values: Some(5),
+            ..Default::default()
+        },
+        ColumnStatistics {
+            number_of_values: Some(5),
+            int_statistics: Some(IntegerStatistics {
+                minimum: Some(0),
+                maximum: Some(4),
+                sum: Some(10),
+            }),
+            ..Default::default()
+        },
+        ColumnStatistics {
+            number_of_values: Some(5),
+            string_statistics: Some(StringStatistics::default()),
+            ..Default::default()
+        },
+    ]
+}
+
+fn statistics_file(statistics: Vec<ColumnStatistics>) -> Bytes {
+    OrcFile::new(vec![numbered_rows(0, 5)]).render_with(|footer, _| {
+        footer.statistics = statistics;
+    })
+}
+
+fn bucket_statistics() -> ColumnStatistics {
+    ColumnStatistics {
+        number_of_values: Some(5),
+        bucket_statistics: Some(BucketStatistics { count: vec![2] }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_statistics_of_the_column_types_read() {
+    assert_reads(statistics_file(typed_statistics()), expected(0, 5));
+}
+
+#[test]
+fn test_stripe_with_a_gap_before_it_reads() {
+    let mut file = two_stripes();
+    file.stripe_padding = 17;
+    assert_reads(file.render(), expected(0, 9));
+}
+
+#[test]
+fn test_gap_after_the_last_stripe_of_an_encrypted_file_reads() {
+    let mut file = two_stripes();
+    file.trailing = vec![0; 9];
+    assert_reads(
+        file.render_with(|footer, _| footer.encryption = Some(Encryption::default())),
+        expected(0, 9),
+    );
+}
+
+#[test]
+#[ignore = "statistics are not compared with the column types yet"]
+fn test_statistics_of_another_column_type_are_refused() {
+    let mut statistics = typed_statistics();
+    statistics.swap(1, 2);
+    assert_refused(
+        statistics_file(statistics),
+        "column 1 of type Int has statistics of another type",
+    );
+}
+
+#[test]
+#[ignore = "statistics are not compared with the column types yet"]
+fn test_bucket_statistics_on_an_int_column_are_refused() {
+    let mut statistics = typed_statistics();
+    statistics[1] = bucket_statistics();
+    assert_refused(
+        statistics_file(statistics),
+        "has statistics of another type",
+    );
+}
+
+#[test]
+#[ignore = "statistics are not compared with the column types yet"]
+fn test_integer_statistics_on_the_struct_column_are_refused() {
+    let mut statistics = typed_statistics();
+    statistics[0] = statistics[1].clone();
+    assert_refused(
+        statistics_file(statistics),
+        "column 0 of type Struct has statistics of another type",
+    );
+}
+
+#[test]
+#[ignore = "statistics are not compared with the column types yet"]
+fn test_statistics_that_are_not_one_per_column_are_refused() {
+    let mut statistics = typed_statistics();
+    statistics.pop();
+    assert_refused(
+        statistics_file(statistics),
+        "2 column statistics for 3 columns",
+    );
+}
+
+#[test]
+#[ignore = "statistics are not compared with the column types yet"]
+fn test_stripe_statistics_of_another_column_type_are_refused() {
+    let mut file = OrcFile::new(vec![numbered_rows(0, 5)]);
+    let mut statistics = typed_statistics();
+    statistics.swap(1, 2);
+    file.stripe_statistics = vec![StripeStatistics {
+        col_stats: statistics,
+    }];
+    assert_refused(file.render(), "has statistics of another type");
+}
+
+#[test]
+fn test_stripe_statistics_of_the_column_types_read() {
+    let mut file = OrcFile::new(vec![numbered_rows(0, 5)]);
+    file.stripe_statistics = vec![StripeStatistics {
+        col_stats: typed_statistics(),
+    }];
+    assert_reads(file.render(), expected(0, 5));
+}
+
+#[test]
+#[ignore = "the end of the last stripe is not compared with the file tail yet"]
+fn test_bytes_between_the_last_stripe_and_the_file_tail_are_refused() {
+    let mut file = two_stripes();
+    file.trailing = vec![0; 5];
+    assert_refused(file.render(), "The last stripe ends at");
+}
+
+#[test]
+#[ignore = "the end of the last stripe is not compared with the file tail yet"]
+fn test_bytes_after_the_magic_of_a_file_without_stripes_are_refused() {
+    let mut file = OrcFile::new(vec![]);
+    file.trailing = vec![0; 5];
+    assert_refused(file.render(), "The last stripe ends at 3");
+}
+
+#[test]
+#[ignore = "the end of the last stripe is not compared with the file tail yet"]
+fn test_last_stripe_ending_before_the_file_tail_is_refused() {
+    let file = two_stripes().render_with(|footer, _| {
+        footer.stripes[1].footer_length = Some(footer.stripes[1].footer_length() - 1);
+    });
+    assert_refused(file, "The last stripe ends at");
+}
+
+#[test]
+#[ignore = "type kinds are not required yet"]
+fn test_type_without_a_kind_is_refused() {
+    let mut file = two_stripes();
+    file.types[1].kind = None;
+    let error = read(file.render(), 8192).unwrap_err();
+    assert!(
+        error.contains("column index 1 has no known kind"),
+        "{error}"
+    );
+}
+
+#[test]
+#[ignore = "type kinds are not required yet"]
+fn test_type_of_unknown_kind_is_refused() {
+    let mut file = two_stripes();
+    file.types[2].kind = Some(99);
+    let error = read(file.render(), 8192).unwrap_err();
+    assert!(
+        error.contains("column index 2 has no known kind"),
+        "{error}"
+    );
+}
+
+#[test]
+#[ignore = "stream and encoding kinds are not required yet"]
+fn test_stream_without_a_kind_is_refused() {
+    let mut file = two_stripes();
+    file.stripes[0].footer.streams[0].kind = None;
+    assert_refused(file.render(), "column 1 has a stream of no known kind");
+}
+
+#[test]
+#[ignore = "stream and encoding kinds are not required yet"]
+fn test_encoding_without_a_kind_is_refused() {
+    let mut file = two_stripes();
+    file.stripes[1].footer.columns[2].kind = None;
+    assert_refused(file.render(), "column 2 has no known encoding kind");
 }
