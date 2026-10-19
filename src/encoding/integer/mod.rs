@@ -30,7 +30,7 @@ use rle_v2::RleV2Decoder;
 use snafu::ResultExt;
 use util::{get_closest_aligned_bit_width, signed_zigzag_decode, signed_zigzag_encode};
 
-use crate::error::{IoSnafu, Result};
+use crate::error::{IoSnafu, OutOfSpecSnafu, Result};
 
 use super::PrimitiveValueDecoder;
 
@@ -147,10 +147,12 @@ pub trait NInt:
     fn as_i64(self) -> i64;
 
     fn read_big_endian(reader: &mut impl Read, byte_size: usize) -> Result<Self> {
-        debug_assert!(
-            byte_size <= Self::BYTE_SIZE,
-            "byte_size cannot exceed max byte size of self"
-        );
+        if byte_size > Self::BYTE_SIZE {
+            return OutOfSpecSnafu {
+                msg: "byte width of encoded integer exceeds byte size of integer being decoded to",
+            }
+            .fail();
+        }
         let mut buffer = Self::empty_byte_array();
         // Read into back part of buffer since is big endian.
         // So if smaller than N::BYTE_SIZE bytes, most significant bytes will be 0.
@@ -300,5 +302,21 @@ impl NInt for i64 {
     #[inline]
     fn as_i64(self) -> i64 {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    #[test]
+    fn test_read_big_endian_byte_size_exceeds_integer() {
+        let mut reader = Cursor::new(vec![0; 16]);
+        assert!(i16::read_big_endian(&mut reader, 3).is_err());
+        assert!(i32::read_big_endian(&mut reader, 5).is_err());
+        assert!(i64::read_big_endian(&mut reader, 9).is_err());
+        assert_eq!(i16::read_big_endian(&mut reader, 2).unwrap(), 0);
     }
 }

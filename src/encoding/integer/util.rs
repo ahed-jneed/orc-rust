@@ -23,7 +23,7 @@ use snafu::OptionExt;
 
 use crate::{
     encoding::util::read_u8,
-    error::{Result, VarintTooLargeSnafu},
+    error::{OutOfSpecSnafu, Result, VarintTooLargeSnafu},
 };
 
 use super::{EncodingSign, NInt, VarintSerde};
@@ -51,6 +51,12 @@ pub fn read_ints<N: NInt>(
         (1..=64).contains(&bit_size),
         "bit_size must be in range [1, 64]"
     );
+    if bit_size > N::BYTE_SIZE * 8 {
+        return OutOfSpecSnafu {
+            msg: "bit width of packed integers exceeds bit width of integer being decoded to",
+        }
+        .fail();
+    }
     match bit_size {
         1 => unrolled_unpack_1(buffer, expected_no_of_ints, r),
         2 => unrolled_unpack_2(buffer, expected_no_of_ints, r),
