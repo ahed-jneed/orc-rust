@@ -179,3 +179,33 @@ impl TryFrom<&proto::ColumnStatistics> for ColumnStatistics {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "panics until boolean statistics without a count are refused"]
+    fn test_boolean_statistics_without_a_count_are_refused() {
+        let stats = proto::ColumnStatistics {
+            number_of_values: Some(3),
+            bucket_statistics: Some(proto::BucketStatistics { count: vec![] }),
+            ..Default::default()
+        };
+        assert!(ColumnStatistics::try_from(&stats).is_err());
+    }
+
+    #[test]
+    fn test_boolean_statistics_with_a_count_are_read() {
+        let stats = proto::ColumnStatistics {
+            number_of_values: Some(3),
+            bucket_statistics: Some(proto::BucketStatistics { count: vec![2] }),
+            ..Default::default()
+        };
+        let stats = ColumnStatistics::try_from(&stats).unwrap();
+        assert!(matches!(
+            stats.type_statistics(),
+            Some(TypeStatistics::Bucket { true_count: 2 })
+        ));
+    }
+}
