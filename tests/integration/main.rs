@@ -30,6 +30,7 @@ use arrow::{
 use pretty_assertions::assert_eq;
 
 use orc_rust::arrow_reader::ArrowReaderBuilder;
+use orc_rust::error::OrcError;
 use orc_rust::{Predicate, PredicateValue};
 
 fn read_orc_file(name: &str) -> RecordBatch {
@@ -291,6 +292,22 @@ fn test_stripe_level_stats() {
 #[ignore] // TODO: Non-struct root type are not supported yet
 fn test_timestamp() {
     test_expected_file("TestOrcFile.testTimestamp");
+}
+
+#[test]
+fn test_timestamp_non_struct_root_is_an_error() {
+    // Until non-struct root types are supported (see test above), opening such a file
+    // should be an error. This used to panic.
+    let path = format!(
+        "{}/tests/integration/data/TestOrcFile.testTimestamp.orc",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let f = File::open(path).unwrap();
+    let err = ArrowReaderBuilder::try_new(f).err().unwrap();
+    assert!(
+        matches!(err, OrcError::UnsupportedTypeVariant { .. }),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

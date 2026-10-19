@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use snafu::{ensure, OptionExt};
 
-use crate::error::{NoTypesSnafu, Result, UnexpectedSnafu};
+use crate::error::{NoTypesSnafu, Result, UnexpectedSnafu, UnsupportedTypeVariantSnafu};
 use crate::projection::ProjectionMask;
 use crate::proto;
 
@@ -153,7 +153,15 @@ impl RootDataType {
     /// Construct from protobuf types.
     pub(crate) fn from_proto(types: &[proto::Type]) -> Result<Self> {
         ensure!(!types.is_empty(), NoTypesSnafu {});
-        let children = parse_struct_children_from_proto(types, 0)?;
+        ensure!(
+            types[0].kind() == proto::r#type::Kind::Struct,
+            UnsupportedTypeVariantSnafu {
+                msg: "root type must be a struct"
+            }
+        );
+        let mut walk = TypeTreeWalk::default();
+        walk.enter(0)?;
+        let children = parse_struct_children_from_proto(types, 0, &mut walk)?;
         let all_children = get_all_children_indices_set(&children);
         Ok(Self {
             children,
@@ -201,11 +209,62 @@ impl Display for NamedColumn {
     }
 }
 
+/// Maximum nesting depth of the type tree, counting the root struct as the first level.
+///
+/// Parsing the type tree, and everything built from it afterwards, recurses once per level.
+/// Real schemas are nowhere near this deep, so the limit only keeps a malformed footer from
+/// overflowing the stack.
+const MAX_TYPE_DEPTH: usize = 100;
+
+/// Tracks the position while walking the flattened type list of a file footer.
+///
+/// In a well-formed file the list describes a tree rooted at index 0, in which every type
+/// has exactly one parent. The footer is not trusted though. A type listed as a subtype more
+/// than once is parsed once per listing, which never ends if it is part of a cycle (e.g. a
+/// struct listing the root among its subtypes), and a very long chain of nested types would
+/// exhaust the stack. Both are rejected with an error instead.
+///
+/// When an error is returned the walk is abandoned, so [`Self::exit`] is only paired with
+/// [`Self::enter`] on the success path.
+#[derive(Default)]
+struct TypeTreeWalk {
+    visited: HashSet<usize>,
+    depth: usize,
+}
+
+impl TypeTreeWalk {
+    /// Marks the type at `column_index` as visited and descends one level into it.
+    fn enter(&mut self, column_index: usize) -> Result<()> {
+        ensure!(
+            self.depth < MAX_TYPE_DEPTH,
+            UnexpectedSnafu {
+                msg: format!("Types nested deeper than {MAX_TYPE_DEPTH} levels are not supported")
+            }
+        );
+        ensure!(
+            self.visited.insert(column_index),
+            UnexpectedSnafu {
+                msg: format!(
+                    "Column index {column_index} is referenced more than once in the type tree"
+                )
+            }
+        );
+        self.depth += 1;
+        Ok(())
+    }
+
+    /// Returns to the parent of the type last entered.
+    fn exit(&mut self) {
+        self.depth -= 1;
+    }
+}
+
 /// Helper function since this is duplicated for [`RootDataType`] and [`DataType::Struct`]
 /// parsing from proto.
 fn parse_struct_children_from_proto(
     types: &[proto::Type],
     column_index: usize,
+    walk: &mut TypeTreeWalk,
 ) -> Result<Vec<NamedColumn>> {
     // These pre-conditions should always be upheld, especially as this is a private function
     assert!(column_index < types.len());
@@ -226,7 +285,7 @@ fn parse_struct_children_from_proto(
         .map(|(&index, name)| {
             let index = index as usize;
             let name = name.to_owned();
-            let data_type = DataType::from_proto(types, index)?;
+            let data_type = DataType::from_proto(types, index, walk)?;
             Ok(NamedColumn { name, data_type })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -387,12 +446,17 @@ impl DataType {
         indices
     }
 
-    fn from_proto(types: &[proto::Type], column_index: usize) -> Result<Self> {
+    fn from_proto(
+        types: &[proto::Type],
+        column_index: usize,
+        walk: &mut TypeTreeWalk,
+    ) -> Result<Self> {
         use proto::r#type::Kind;
 
         let ty = types.get(column_index).context(UnexpectedSnafu {
             msg: format!("Column index out of bounds: {column_index}"),
         })?;
+        walk.enter(column_index)?;
         let dt = match ty.kind() {
             Kind::Boolean => Self::Boolean { column_index },
             Kind::Byte => Self::Byte { column_index },
@@ -416,7 +480,7 @@ impl DataType {
                     }
                 );
                 let child = ty.subtypes[0] as usize;
-                let child = Box::new(Self::from_proto(types, child)?);
+                let child = Box::new(Self::from_proto(types, child, walk)?);
                 Self::List {
                     column_index,
                     child,
@@ -434,9 +498,9 @@ impl DataType {
                     }
                 );
                 let key = ty.subtypes[0] as usize;
-                let key = Box::new(Self::from_proto(types, key)?);
+                let key = Box::new(Self::from_proto(types, key, walk)?);
                 let value = ty.subtypes[1] as usize;
-                let value = Box::new(Self::from_proto(types, value)?);
+                let value = Box::new(Self::from_proto(types, value, walk)?);
                 Self::Map {
                     column_index,
                     key,
@@ -444,7 +508,7 @@ impl DataType {
                 }
             }
             Kind::Struct => {
-                let children = parse_struct_children_from_proto(types, column_index)?;
+                let children = parse_struct_children_from_proto(types, column_index, walk)?;
                 Self::Struct {
                     column_index,
                     children,
@@ -467,7 +531,7 @@ impl DataType {
                     .iter()
                     .map(|&index| {
                         let index = index as usize;
-                        Self::from_proto(types, index)
+                        Self::from_proto(types, index, walk)
                     })
                     .collect::<Result<Vec<_>>>()?;
                 Self::Union {
@@ -491,6 +555,7 @@ impl DataType {
             },
             Kind::TimestampInstant => Self::TimestampWithLocalTimezone { column_index },
         };
+        walk.exit();
         Ok(dt)
     }
 
@@ -639,5 +704,162 @@ impl Display for DataType {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proto::r#type::Kind;
+
+    use crate::error::OrcError;
+
+    use super::*;
+
+    fn proto_type(kind: Kind, subtypes: &[u32], field_names: &[&str]) -> proto::Type {
+        proto::Type {
+            kind: Some(kind as i32),
+            subtypes: subtypes.to_vec(),
+            field_names: field_names.iter().map(|name| name.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// A root struct holding one field that is `levels - 2` lists nested in each other,
+    /// ending in an int. The type tree is `levels` deep, counting the root.
+    fn nested_lists(levels: usize) -> Vec<proto::Type> {
+        let mut types = vec![proto_type(Kind::Struct, &[1], &["nested"])];
+        for index in 1..levels - 1 {
+            types.push(proto_type(Kind::List, &[index as u32 + 1], &[]));
+        }
+        types.push(proto_type(Kind::Int, &[], &[]));
+        types
+    }
+
+    fn assert_unexpected(types: &[proto::Type], expected_msg: &str) {
+        match RootDataType::from_proto(types) {
+            Err(OrcError::Unexpected { msg, .. }) => assert!(
+                msg.contains(expected_msg),
+                "unexpected message: {msg}, wanted: {expected_msg}"
+            ),
+            other => panic!("expected an Unexpected error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_tree() {
+        let types = vec![
+            proto_type(Kind::Struct, &[1, 2, 5], &["id", "map", "union"]),
+            proto_type(Kind::Long, &[], &[]),
+            proto_type(Kind::Map, &[3, 4], &[]),
+            proto_type(Kind::String, &[], &[]),
+            proto_type(Kind::Double, &[], &[]),
+            proto_type(Kind::Union, &[6, 7], &[]),
+            proto_type(Kind::Int, &[], &[]),
+            proto_type(Kind::Date, &[], &[]),
+        ];
+        let root = RootDataType::from_proto(&types).unwrap();
+
+        let names = root.children().iter().map(|c| c.name()).collect::<Vec<_>>();
+        assert_eq!(names, ["id", "map", "union"]);
+        for index in 0..types.len() {
+            assert!(root.contains_column_index(index));
+        }
+        assert_eq!(root.children()[1].data_type().all_indices(), [2, 3, 4]);
+        assert_eq!(root.children()[2].data_type().all_indices(), [5, 6, 7]);
+    }
+
+    #[test]
+    fn test_non_struct_root_is_an_error() {
+        let types = vec![proto_type(Kind::Timestamp, &[], &[])];
+        let err = RootDataType::from_proto(&types).unwrap_err();
+        assert!(
+            matches!(err, OrcError::UnsupportedTypeVariant { .. }),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_type_referencing_root_is_an_error() {
+        // Used to recurse until the stack overflowed, aborting the process
+        let types = vec![
+            proto_type(Kind::Struct, &[1], &["a"]),
+            proto_type(Kind::Struct, &[0], &["b"]),
+        ];
+        assert_unexpected(&types, "Column index 0 is referenced more than once");
+
+        let types = vec![
+            proto_type(Kind::Struct, &[1], &["a"]),
+            proto_type(Kind::Union, &[0, 2], &[]),
+            proto_type(Kind::Int, &[], &[]),
+        ];
+        assert_unexpected(&types, "Column index 0 is referenced more than once");
+
+        let types = vec![proto_type(Kind::Struct, &[0], &["a"])];
+        assert_unexpected(&types, "Column index 0 is referenced more than once");
+    }
+
+    #[test]
+    fn test_type_referencing_itself_is_an_error() {
+        let types = vec![
+            proto_type(Kind::Struct, &[1], &["a"]),
+            proto_type(Kind::List, &[1], &[]),
+        ];
+        assert_unexpected(&types, "Column index 1 is referenced more than once");
+
+        let types = vec![
+            proto_type(Kind::Struct, &[1], &["a"]),
+            proto_type(Kind::Map, &[2, 1], &[]),
+            proto_type(Kind::String, &[], &[]),
+        ];
+        assert_unexpected(&types, "Column index 1 is referenced more than once");
+    }
+
+    #[test]
+    fn test_type_with_multiple_parents_is_an_error() {
+        // Not a cycle, but the same column would be read twice (and, nested in
+        // each other, make the tree grow exponentially)
+        let types = vec![
+            proto_type(Kind::Struct, &[1, 1], &["a", "b"]),
+            proto_type(Kind::Int, &[], &[]),
+        ];
+        assert_unexpected(&types, "Column index 1 is referenced more than once");
+
+        let types = vec![
+            proto_type(Kind::Struct, &[1, 2], &["a", "b"]),
+            proto_type(Kind::List, &[2], &[]),
+            proto_type(Kind::Int, &[], &[]),
+        ];
+        assert_unexpected(&types, "Column index 2 is referenced more than once");
+    }
+
+    #[test]
+    fn test_out_of_bounds_subtype_is_an_error() {
+        let types = vec![proto_type(Kind::Struct, &[1], &["a"])];
+        assert_unexpected(&types, "Column index out of bounds: 1");
+    }
+
+    #[test]
+    fn test_maximum_nesting_depth() {
+        let types = nested_lists(MAX_TYPE_DEPTH);
+        let root = RootDataType::from_proto(&types).unwrap();
+        // Everything built on top of the parsed types recurses as well
+        let schema = root.create_arrow_schema(&HashMap::new());
+        assert_eq!(schema.fields().len(), 1);
+        assert!(root.to_string().ends_with("INTEGER"));
+        assert_eq!(
+            root.children()[0].data_type().all_indices().len(),
+            types.len() - 1
+        );
+        drop(root.clone());
+
+        let types = nested_lists(MAX_TYPE_DEPTH + 1);
+        assert_unexpected(&types, "nested deeper than");
+    }
+
+    #[test]
+    fn test_excessive_nesting_depth_is_an_error() {
+        // Without a limit this much nesting overflows the stack
+        let types = nested_lists(100_000);
+        assert_unexpected(&types, "nested deeper than");
     }
 }
