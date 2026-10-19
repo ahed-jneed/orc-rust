@@ -21,17 +21,38 @@ use std::sync::Arc;
 use arrow::array::ArrayRef;
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::Decimal128Type;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::encoding::decimal::UnboundedVarintStreamDecoder;
-use crate::encoding::integer::get_signed_int_decoder;
+use crate::encoding::integer::{get_signed_int_decoder, RleVersion};
 use crate::encoding::PrimitiveValueDecoder;
-use crate::error::ArrowSnafu;
+use crate::error::{ArrowSnafu, OutOfSpecSnafu};
 use crate::proto::stream::Kind;
 use crate::stripe::Stripe;
 use crate::{column::Column, error::Result};
 
 use super::{ArrayBatchDecoder, PresentDecoder, PrimitiveArrayDecoder};
+
+const MAX_DECIMAL64_PRECISION: u32 = 18;
+
+struct Decimal64Decoder {
+    iter: Box<dyn PrimitiveValueDecoder<i64> + Send>,
+}
+
+impl PrimitiveValueDecoder<i128> for Decimal64Decoder {
+    fn skip(&mut self, n: usize) -> Result<()> {
+        self.iter.skip(n)
+    }
+
+    fn decode(&mut self, out: &mut [i128]) -> Result<()> {
+        let mut values = vec![0; out.len()];
+        self.iter.decode(&mut values)?;
+        for (o, v) in out.iter_mut().zip(values) {
+            *o = v as i128;
+        }
+        Ok(())
+    }
+}
 
 pub fn new_decimal_decoder(
     column: &Column,
@@ -39,6 +60,23 @@ pub fn new_decimal_decoder(
     precision: u32,
     fixed_scale: u32,
 ) -> Box<dyn ArrayBatchDecoder> {
+    if precision <= MAX_DECIMAL64_PRECISION
+        && stripe
+            .stream_map()
+            .get_opt(column, Kind::Secondary)
+            .is_none()
+    {
+        let data = stripe.stream_map().get(column, Kind::Data);
+        let iter = get_signed_int_decoder::<i64>(data, RleVersion::V2);
+        let present = PresentDecoder::from_stripe(stripe, column);
+        return Box::new(DecimalArrayDecoder::new(
+            precision as u8,
+            fixed_scale as i8,
+            Box::new(Decimal64Decoder { iter }),
+            present,
+        ));
+    }
+
     let varint_iter = stripe.stream_map().get(column, Kind::Data);
     let varint_iter = Box::new(UnboundedVarintStreamDecoder::new(varint_iter));
 
@@ -129,13 +167,13 @@ impl PrimitiveValueDecoder<i128> for DecimalScaleRepairDecoder {
         self.varint_iter.decode(&mut varint)?;
         self.scale_iter.decode(&mut scale)?;
         for (index, (&varint, &scale)) in varint.iter().zip(scale.iter()).enumerate() {
-            out[index] = fix_i128_scale(varint, self.fixed_scale, scale);
+            out[index] = fix_i128_scale(varint, self.fixed_scale, scale)?;
         }
         Ok(())
     }
 }
 
-fn fix_i128_scale(i: i128, fixed_scale: u32, varying_scale: i32) -> i128 {
+fn fix_i128_scale(i: i128, fixed_scale: u32, varying_scale: i32) -> Result<i128> {
     // TODO: Verify with C++ impl in ORC repo, which does this cast
     //       Not sure why scale stream can be signed if it gets casted to unsigned anyway
     //       https://github.com/apache/orc/blob/0014bec1e4cdd1206f5bae4f5c2000b9300c6eb1/c%2B%2B/src/ColumnReader.cc#L1459-L1476
@@ -148,10 +186,10 @@ fn fix_i128_scale(i: i128, fixed_scale: u32, varying_scale: i32) -> i128 {
             // TODO: this differs from C++ implementation, need to verify
             let scale_factor = varying_scale - fixed_scale;
             // TODO: replace with lookup table?
-            let scale_factor = 10_i128.pow(scale_factor);
-            i / scale_factor
+            let scale_factor = scale_factor_pow10(scale_factor)?;
+            Ok(i / scale_factor)
         }
-        Ordering::Equal => i,
+        Ordering::Equal => Ok(i),
         Ordering::Greater => {
             // fixed_scale > varying_scale
             // Current scale of number is smaller than scale of the array type
@@ -159,8 +197,16 @@ fn fix_i128_scale(i: i128, fixed_scale: u32, varying_scale: i32) -> i128 {
             // TODO: this differs from C++ implementation, need to verify
             let scale_factor = fixed_scale - varying_scale;
             // TODO: replace with lookup table?
-            let scale_factor = 10_i128.pow(scale_factor);
-            i * scale_factor
+            let scale_factor = scale_factor_pow10(scale_factor)?;
+            i.checked_mul(scale_factor).context(OutOfSpecSnafu {
+                msg: "decimal value overflows when aligning scale",
+            })
         }
     }
+}
+
+fn scale_factor_pow10(exponent: u32) -> Result<i128> {
+    10_i128.checked_pow(exponent).context(OutOfSpecSnafu {
+        msg: "decimal scale difference is out of range",
+    })
 }

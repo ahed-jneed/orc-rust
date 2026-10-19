@@ -31,6 +31,7 @@ use orc_rust::async_arrow_reader::ArrowStreamReader;
 use orc_rust::projection::ProjectionMask;
 use orc_rust::TimestampPrecision;
 
+mod decimal64;
 mod misc;
 mod timestamp_secondary;
 

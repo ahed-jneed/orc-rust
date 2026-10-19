@@ -110,6 +110,15 @@ impl RootDataType {
         self.all_children.contains(&index)
     }
 
+    /// Number of column indices needed to cover every projected column.
+    pub fn required_column_count(&self) -> usize {
+        self.all_children
+            .iter()
+            .map(|index| index + 1)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Convert into an Arrow schema.
     pub fn create_arrow_schema(&self, user_metadata: &HashMap<String, String>) -> Schema {
         self.create_arrow_schema_with_options(user_metadata, ArrowSchemaOptions::new())
