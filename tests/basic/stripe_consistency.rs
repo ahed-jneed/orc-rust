@@ -79,12 +79,15 @@ fn signed_run(values: &[i64]) -> Vec<u8> {
     literal_run(&values.iter().map(|&v| zigzag(v)).collect::<Vec<_>>())
 }
 
+type RawEdit = fn(Vec<u8>) -> Vec<u8>;
+
 struct StripeSpec {
     rows: u64,
     index: u64,
     data: u64,
     body: Vec<u8>,
     footer: StripeFooter,
+    footer_edit: Option<RawEdit>,
 }
 
 fn encoding(kind: EncodingKind, dictionary_size: Option<u32>) -> ColumnEncoding {
@@ -111,6 +114,7 @@ fn stripe(rows: u64, streams: &[(u32, Kind, Vec<u8>)], encodings: &[ColumnEncodi
             columns: encodings.to_vec(),
             ..Default::default()
         },
+        footer_edit: None,
     };
     for (column, kind, bytes) in streams {
         if is_index(*kind) {
@@ -157,6 +161,8 @@ struct OrcFile {
     stripe_padding: usize,
     trailing: Vec<u8>,
     stripe_statistics: Vec<StripeStatistics>,
+    footer_edit: Option<RawEdit>,
+    postscript_edit: Option<RawEdit>,
 }
 
 impl OrcFile {
@@ -170,6 +176,8 @@ impl OrcFile {
             stripe_padding: 0,
             trailing: vec![],
             stripe_statistics: vec![],
+            footer_edit: None,
+            postscript_edit: None,
         }
     }
 
@@ -200,7 +208,11 @@ impl OrcFile {
             }
             let offset = file.len() as u64;
             file.extend_from_slice(&spec.body);
-            let stripe_footer = self.section(spec.footer.encode_to_vec());
+            let mut stripe_footer = spec.footer.encode_to_vec();
+            if let Some(edit) = spec.footer_edit {
+                stripe_footer = edit(stripe_footer);
+            }
+            let stripe_footer = self.section(stripe_footer);
             file.extend_from_slice(&stripe_footer);
             footer.stripes.push(StripeInformation {
                 offset: Some(offset),
@@ -230,10 +242,17 @@ impl OrcFile {
             ..Default::default()
         };
         edit(&mut footer, &mut postscript);
-        let footer = self.section(footer.encode_to_vec());
+        let mut footer_bytes = footer.encode_to_vec();
+        if let Some(edit) = self.footer_edit {
+            footer_bytes = edit(footer_bytes);
+        }
+        let footer = self.section(footer_bytes);
         postscript.footer_length = postscript.footer_length.or(Some(footer.len() as u64));
         file.extend_from_slice(&footer);
-        let postscript = postscript.encode_to_vec();
+        let mut postscript = postscript.encode_to_vec();
+        if let Some(edit) = self.postscript_edit {
+            postscript = edit(postscript);
+        }
         file.extend_from_slice(&postscript);
         file.push(postscript.len() as u8);
         Bytes::from(file)
@@ -1068,4 +1087,260 @@ fn test_encrypted_streams_on_any_column_are_not_refused() {
         &direct(3),
     );
     assert_reads(OrcFile::new(vec![encrypted]).render(), expected(0, 5));
+}
+
+fn field_varint(number: u64, value: u64) -> Vec<u8> {
+    let mut out = varint(number << 3);
+    out.extend(varint(value));
+    out
+}
+
+fn field_bytes(number: u64, bytes: &[u8]) -> Vec<u8> {
+    let mut out = varint((number << 3) | 2);
+    out.extend(varint(bytes.len() as u64));
+    out.extend_from_slice(bytes);
+    out
+}
+
+fn read_varint(buf: &[u8], at: &mut usize) -> u64 {
+    let mut value = 0;
+    let mut shift = 0;
+    loop {
+        let byte = buf[*at];
+        *at += 1;
+        value |= u64::from(byte & 0x7F) << shift;
+        if byte & 0x80 == 0 {
+            return value;
+        }
+        shift += 7;
+    }
+}
+
+fn append_to_field(buf: &[u8], number: u64, occurrence: usize, extra: &[u8]) -> Vec<u8> {
+    let mut out = vec![];
+    let mut at = 0;
+    let mut seen = 0;
+    while at < buf.len() {
+        let start = at;
+        let tag = read_varint(buf, &mut at);
+        match tag & 7 {
+            0 => {
+                read_varint(buf, &mut at);
+                out.extend_from_slice(&buf[start..at]);
+            }
+            2 => {
+                let length = read_varint(buf, &mut at) as usize;
+                let body = &buf[at..at + length];
+                at += length;
+                if tag >> 3 == number {
+                    seen += 1;
+                    if seen == occurrence + 1 {
+                        let mut body = body.to_vec();
+                        body.extend_from_slice(extra);
+                        out.extend(field_bytes(number, &body));
+                        continue;
+                    }
+                }
+                out.extend_from_slice(&buf[start..at]);
+            }
+            wire => panic!("unexpected wire type {wire}"),
+        }
+    }
+    assert!(seen > occurrence, "field {number} occurs {seen} times");
+    out
+}
+
+#[test]
+fn test_unpacked_repeated_fields_read() {
+    let mut file = OrcFile::new(vec![numbered_rows(0, 5)]);
+    file.types[0].subtypes.clear();
+    file.types[0].field_names.clear();
+    file.footer_edit = Some(|footer| {
+        let extra = [
+            field_varint(2, 1),
+            field_varint(2, 2),
+            field_bytes(3, b"a"),
+            field_bytes(3, b"s"),
+        ]
+        .concat();
+        append_to_field(&footer, 4, 0, &extra)
+    });
+    assert_reads(file.render(), expected(0, 5));
+}
+
+#[test]
+#[ignore = "repeated singular protobuf fields are not refused yet"]
+fn test_footer_field_that_occurs_twice_is_refused() {
+    let mut file = two_stripes();
+    file.footer_edit = Some(|footer| [footer, field_varint(8, 100)].concat());
+    let error = read(file.render(), 8192).unwrap_err();
+    assert!(
+        error.contains("field 8 of the footer occurs more than once"),
+        "{error}"
+    );
+}
+
+#[test]
+#[ignore = "repeated singular protobuf fields are not refused yet"]
+fn test_type_kind_that_occurs_twice_is_refused() {
+    let mut file = two_stripes();
+    file.footer_edit = Some(|footer| append_to_field(&footer, 4, 1, &field_varint(1, 0)));
+    let error = read(file.render(), 8192).unwrap_err();
+    assert!(
+        error.contains("field 1 of a type occurs more than once"),
+        "{error}"
+    );
+}
+
+#[test]
+#[ignore = "repeated singular protobuf fields are not refused yet"]
+fn test_stripe_information_field_that_occurs_twice_is_refused() {
+    let mut file = two_stripes();
+    file.footer_edit = Some(|footer| append_to_field(&footer, 3, 1, &field_varint(5, 1)));
+    let error = read(file.render(), 8192).unwrap_err();
+    assert!(
+        error.contains("field 5 of a stripe information occurs more than once"),
+        "{error}"
+    );
+}
+
+#[test]
+#[ignore = "repeated singular protobuf fields are not refused yet"]
+fn test_postscript_field_that_occurs_twice_is_refused() {
+    let mut file = two_stripes();
+    file.postscript_edit = Some(|postscript| [postscript, field_varint(2, 0)].concat());
+    let error = read(file.render(), 8192).unwrap_err();
+    assert!(
+        error.contains("field 2 of the postscript occurs more than once"),
+        "{error}"
+    );
+}
+
+#[test]
+#[ignore = "repeated singular protobuf fields are not refused yet"]
+fn test_stream_field_that_occurs_twice_is_refused() {
+    let mut file = two_stripes();
+    file.stripes[0].footer_edit =
+        Some(|footer| append_to_field(&footer, 1, 2, &field_varint(3, 0)));
+    assert_refused(file.render(), "field 3 of a stream occurs more than once");
+}
+
+#[test]
+#[ignore = "repeated singular protobuf fields are not refused yet"]
+fn test_column_encoding_field_that_occurs_twice_is_refused() {
+    let mut file = two_stripes();
+    file.stripes[1].footer_edit =
+        Some(|footer| append_to_field(&footer, 2, 1, &field_varint(1, 0)));
+    assert_refused(
+        file.render(),
+        "field 1 of a column encoding occurs more than once",
+    );
+}
+
+#[test]
+#[ignore = "repeated singular protobuf fields are not refused yet"]
+fn test_stripe_footer_timezone_that_occurs_twice_is_refused() {
+    let mut file = two_stripes();
+    file.stripes[0].footer_edit =
+        Some(|footer| [footer, field_bytes(3, b"UTC"), field_bytes(3, b"UTC")].concat());
+    assert_refused(
+        file.render(),
+        "field 3 of a stripe footer occurs more than once",
+    );
+}
+
+#[test]
+#[ignore = "dictionary encodings are not required to state a size yet"]
+fn test_dictionary_encoding_without_a_size_is_refused() {
+    let mut stripe = dictionary_stripe(2, &[1, 2], b"xyz", &[0, 1, 1, 0, 1]);
+    stripe.footer.columns[2].dictionary_size = None;
+    let error = dictionary_values(OrcFile::new(vec![stripe]).render()).unwrap_err();
+    assert!(error.contains("column 2 has no dictionary size"), "{error}");
+}
+
+#[test]
+#[ignore = "dictionary data under a direct encoding is not refused yet"]
+fn test_dictionary_data_under_a_direct_encoding_is_refused() {
+    let mut stripe = dictionary_stripe(2, &[1, 2], b"xyz", &[0, 1, 1, 0, 1]);
+    stripe.footer.columns[2] = encoding(EncodingKind::Direct, None);
+    let error = dictionary_values(OrcFile::new(vec![stripe]).render()).unwrap_err();
+    assert!(
+        error.contains("column 2 has a DictionaryData stream but Direct encoding"),
+        "{error}"
+    );
+}
+
+fn tinyint_file(minimum: i64, maximum: i64) -> Bytes {
+    let mut file = OrcFile::new(vec![stripe(
+        5,
+        &[(1, Kind::Data, vec![0xFB, 1, 2, 3, 4, 5])],
+        &direct(2),
+    )]);
+    file.types = vec![
+        node(TypeKind::Struct, &[1], &["b"]),
+        node(TypeKind::Byte, &[], &[]),
+    ];
+    file.render_with(|footer, _| {
+        footer.statistics = vec![
+            ColumnStatistics {
+                number_of_values: Some(5),
+                ..Default::default()
+            },
+            ColumnStatistics {
+                number_of_values: Some(5),
+                int_statistics: Some(IntegerStatistics {
+                    minimum: Some(minimum),
+                    maximum: Some(maximum),
+                    sum: None,
+                }),
+                ..Default::default()
+            },
+        ];
+    })
+}
+
+#[test]
+fn test_integer_statistics_within_the_column_type_read() {
+    let batches = read(tinyint_file(-128, 127), 8192).unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        5
+    );
+}
+
+#[test]
+#[ignore = "integer statistics are not compared with the column type's range yet"]
+fn test_integer_statistics_beyond_the_column_type_are_refused() {
+    for (minimum, maximum) in [(-129, 5), (0, 128), (i64::MIN, 5), (0, i64::MAX)] {
+        let error = read(tinyint_file(minimum, maximum), 8192).unwrap_err();
+        assert!(
+            error.contains("column 1 of type Byte has statistics outside the type's range"),
+            "{minimum}..{maximum}: {error}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "integer statistics are not compared with the column type's range yet"]
+fn test_short_and_int_statistics_beyond_the_column_type_are_refused() {
+    let file = |kind: TypeKind, minimum: i64, maximum: i64| {
+        let mut file = OrcFile::new(vec![numbered_rows(0, 5)]);
+        file.types[1].kind = Some(kind as i32);
+        file.render_with(|footer, _| {
+            footer.statistics = typed_statistics();
+            let stats = footer.statistics[1].int_statistics.as_mut().unwrap();
+            stats.minimum = Some(minimum);
+            stats.maximum = Some(maximum);
+        })
+    };
+    assert!(read(file(TypeKind::Short, -32768, 32767), 8192).is_ok());
+    assert!(read(file(TypeKind::Int, i32::MIN.into(), i32::MAX.into()), 8192).is_ok());
+    assert!(read(file(TypeKind::Long, i64::MIN, i64::MAX), 8192).is_ok());
+    let error = read(file(TypeKind::Short, 0, 32768), 8192).unwrap_err();
+    assert!(
+        error.contains("type Short has statistics outside"),
+        "{error}"
+    );
+    let error = read(file(TypeKind::Int, i64::from(i32::MIN) - 1, 0), 8192).unwrap_err();
+    assert!(error.contains("type Int has statistics outside"), "{error}");
 }

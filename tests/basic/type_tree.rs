@@ -246,12 +246,6 @@ fn test_empty_type_list_is_refused() {
 }
 
 #[test]
-fn test_unreferenced_types_are_still_read() {
-    let schema = open(vec![structure(&[1]), leaf(), leaf()]).unwrap();
-    assert_eq!(schema, "ROOT\n  c INTEGER");
-}
-
-#[test]
 fn test_nested_compound_types_are_read() {
     let types = vec![
         node(Kind::Struct, &[1, 3, 7], &["list", "map", "union"]),
@@ -274,11 +268,21 @@ fn test_nested_compound_types_are_read() {
 }
 
 #[test]
-fn test_types_that_nothing_refers_to_are_not_checked() {
+#[ignore = "types that nothing refers to are not refused yet"]
+fn test_types_that_nothing_refers_to_are_refused() {
+    assert_refused(
+        vec![structure(&[1]), leaf(), leaf()],
+        "not referred to by any type",
+    );
     let mut orphan = structure(&[0]);
     orphan.field_names.clear();
-    let schema = open(vec![structure(&[1]), leaf(), orphan, structure(&[9])]).unwrap();
-    assert_eq!(schema, "ROOT\n  c INTEGER");
+    assert_refused(
+        vec![structure(&[1]), leaf(), orphan, structure(&[9])],
+        "not referred to by any type",
+    );
+    let mut root = structure(&[]);
+    root.field_names.clear();
+    assert_refused(vec![root, leaf()], "not referred to by any type");
 }
 
 #[test]
