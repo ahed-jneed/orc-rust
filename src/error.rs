@@ -129,6 +129,34 @@ pub enum OrcError {
         arrow_type: ArrowDataType,
     },
 
+    #[snafu(display(
+        "Column '{}' has an invalid decimal type (precision {}, scale {})",
+        column,
+        precision,
+        scale,
+    ))]
+    InvalidDecimalType {
+        #[snafu(implicit)]
+        location: Location,
+        column: String,
+        precision: u32,
+        scale: u32,
+    },
+
+    #[snafu(display(
+        "Column '{}' has a decimal value with scale {} that cannot be represented exactly in scale {}, the scale of a decimal type recorded without a scale",
+        column,
+        value_scale,
+        column_scale,
+    ))]
+    DecimalScaleLoss {
+        #[snafu(implicit)]
+        location: Location,
+        column: String,
+        value_scale: u32,
+        column_scale: u32,
+    },
+
     #[snafu(display("Failed to convert to record batch: {}", source))]
     ConvertRecordBatch {
         #[snafu(implicit)]

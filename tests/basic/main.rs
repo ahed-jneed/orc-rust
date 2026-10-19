@@ -32,6 +32,9 @@ use orc_rust::projection::ProjectionMask;
 use orc_rust::TimestampPrecision;
 
 mod decimal64;
+mod decimal_matrix;
+mod decimal_unspecified;
+mod decimal_unspecified_scale;
 mod empty_struct;
 mod misc;
 mod rle_v1_wrapping;
