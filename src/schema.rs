@@ -168,7 +168,7 @@ impl RootDataType {
 
     /// Construct from protobuf types.
     pub(crate) fn from_proto(types: &[proto::Type]) -> Result<Self> {
-        ensure!(!types.is_empty(), NoTypesSnafu {});
+        validate_type_tree(types)?;
         let children = parse_struct_children_from_proto(types, 0)?;
         let all_children = get_all_children_indices_set(&children);
         Ok(Self {
@@ -217,26 +217,119 @@ impl Display for NamedColumn {
     }
 }
 
+/// Checks the shape of the whole type list before any of it is walked, so the
+/// recursive conversion only ever sees a tree no deeper than
+/// [`MAX_TYPE_TREE_DEPTH`] in which every type has at most one parent.
+///
+/// The ORC format numbers the types so that a compound type is followed by its
+/// children, hence a subtype index must be larger than the index of its parent.
+fn validate_type_tree(types: &[proto::Type]) -> Result<()> {
+    use proto::r#type::Kind;
+
+    ensure!(!types.is_empty(), NoTypesSnafu {});
+    ensure!(
+        types[0].kind() == Kind::Struct,
+        UnexpectedSnafu {
+            msg: format!("Root type must be a struct, found {:?}", types[0].kind())
+        }
+    );
+    let mut depths: Vec<Option<usize>> = vec![None; types.len()];
+    depths[0] = Some(0);
+    for (column_index, ty) in types.iter().enumerate() {
+        let Some(depth) = depths[column_index] else {
+            continue;
+        };
+        match ty.kind() {
+            Kind::Struct => ensure!(
+                ty.subtypes.len() == ty.field_names.len(),
+                UnexpectedSnafu {
+                    msg: format!(
+                        "Struct type for column index {column_index} must have matching lengths for subtypes and field names lists"
+                    )
+                }
+            ),
+            Kind::List => ensure!(
+                ty.subtypes.len() == 1,
+                UnexpectedSnafu {
+                    msg: format!(
+                        "List type for column index {} must have 1 sub type, found {}",
+                        column_index,
+                        ty.subtypes.len()
+                    )
+                }
+            ),
+            Kind::Map => ensure!(
+                ty.subtypes.len() == 2,
+                UnexpectedSnafu {
+                    msg: format!(
+                        "Map type for column index {} must have 2 sub types, found {}",
+                        column_index,
+                        ty.subtypes.len()
+                    )
+                }
+            ),
+            // TODO: bump this limit up to 256
+            Kind::Union => ensure!(
+                ty.subtypes.len() <= 127,
+                UnexpectedSnafu {
+                    msg: format!(
+                        "Union type for column index {} cannot exceed 127 variants, found {}",
+                        column_index,
+                        ty.subtypes.len()
+                    )
+                }
+            ),
+            _ => continue,
+        }
+        for &subtype in &ty.subtypes {
+            let subtype = subtype as usize;
+            ensure!(
+                subtype < types.len(),
+                UnexpectedSnafu {
+                    msg: format!(
+                        "Column index out of bounds: {subtype} (column index {column_index} of {} types)",
+                        types.len()
+                    )
+                }
+            );
+            ensure!(
+                subtype > column_index,
+                UnexpectedSnafu {
+                    msg: format!(
+                        "Column index {column_index} refers to itself or to an earlier column index {subtype}"
+                    )
+                }
+            );
+            ensure!(
+                depths[subtype].is_none(),
+                UnexpectedSnafu {
+                    msg: format!(
+                        "Column index {subtype} is referred to more than once (again by column index {column_index})"
+                    )
+                }
+            );
+            ensure!(
+                depth < MAX_TYPE_TREE_DEPTH,
+                UnexpectedSnafu {
+                    msg: format!(
+                        "Type tree is deeper than the limit of {MAX_TYPE_TREE_DEPTH} levels at column index {subtype}"
+                    )
+                }
+            );
+            depths[subtype] = Some(depth + 1);
+        }
+    }
+    Ok(())
+}
+
 /// Helper function since this is duplicated for [`RootDataType`] and [`DataType::Struct`]
-/// parsing from proto.
+/// parsing from proto. Expects the types to have passed [`validate_type_tree`].
 fn parse_struct_children_from_proto(
     types: &[proto::Type],
     column_index: usize,
 ) -> Result<Vec<NamedColumn>> {
-    // These pre-conditions should always be upheld, especially as this is a private function
-    assert!(column_index < types.len());
     let ty = &types[column_index];
-    assert!(ty.kind() == proto::r#type::Kind::Struct);
-    ensure!(
-        ty.subtypes.len() == ty.field_names.len(),
-        UnexpectedSnafu {
-            msg: format!(
-                "Struct type for column index {column_index} must have matching lengths for subtypes and field names lists"
-            )
-        }
-    );
-    let children = ty
-        .subtypes
+    ty.subtypes
         .iter()
         .zip(ty.field_names.iter())
         .map(|(&index, name)| {
@@ -245,8 +338,7 @@ fn parse_struct_children_from_proto(
             let data_type = DataType::from_proto(types, index)?;
             Ok(NamedColumn { name, data_type })
         })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(children)
+        .collect()
 }
 
 /// Represents the exact data types supported by ORC.
@@ -422,16 +514,6 @@ impl DataType {
             Kind::Binary => Self::Binary { column_index },
             Kind::Timestamp => Self::Timestamp { column_index },
             Kind::List => {
-                ensure!(
-                    ty.subtypes.len() == 1,
-                    UnexpectedSnafu {
-                        msg: format!(
-                            "List type for column index {} must have 1 sub type, found {}",
-                            column_index,
-                            ty.subtypes.len()
-                        )
-                    }
-                );
                 let child = ty.subtypes[0] as usize;
                 let child = Box::new(Self::from_proto(types, child)?);
                 Self::List {
@@ -440,16 +522,6 @@ impl DataType {
                 }
             }
             Kind::Map => {
-                ensure!(
-                    ty.subtypes.len() == 2,
-                    UnexpectedSnafu {
-                        msg: format!(
-                            "Map type for column index {} must have 2 sub types, found {}",
-                            column_index,
-                            ty.subtypes.len()
-                        )
-                    }
-                );
                 let key = ty.subtypes[0] as usize;
                 let key = Box::new(Self::from_proto(types, key)?);
                 let value = ty.subtypes[1] as usize;
@@ -468,17 +540,6 @@ impl DataType {
                 }
             }
             Kind::Union => {
-                // TODO: bump this limit up to 256
-                ensure!(
-                    ty.subtypes.len() <= 127,
-                    UnexpectedSnafu {
-                        msg: format!(
-                            "Union type for column index {} cannot exceed 127 variants, found {}",
-                            column_index,
-                            ty.subtypes.len()
-                        )
-                    }
-                );
                 let variants = ty
                     .subtypes
                     .iter()

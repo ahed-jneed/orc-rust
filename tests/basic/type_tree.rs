@@ -85,23 +85,23 @@ fn chain(depth: usize) -> Vec<Type> {
 }
 
 #[test]
-#[ignore = "fails until type tree validation lands"]
 fn test_root_that_is_not_a_struct_is_refused() {
-    assert_refused(vec![leaf()], "root");
-    assert_refused(vec![node(Kind::List, &[1], &[]), leaf()], "root");
-    assert_refused(vec![node(Kind::Map, &[1, 2], &[]), leaf(), leaf()], "root");
-    assert_refused(vec![node(Kind::Union, &[1], &[]), leaf()], "root");
+    assert_refused(vec![leaf()], "Root type");
+    assert_refused(vec![node(Kind::List, &[1], &[]), leaf()], "Root type");
+    assert_refused(
+        vec![node(Kind::Map, &[1, 2], &[]), leaf(), leaf()],
+        "Root type",
+    );
+    assert_refused(vec![node(Kind::Union, &[1], &[]), leaf()], "Root type");
 }
 
 #[test]
-#[ignore = "fails until type tree validation lands"]
 fn test_struct_naming_itself_as_child_is_refused() {
     assert_refused(vec![structure(&[0])], "refers");
     assert_refused(vec![structure(&[1]), structure(&[1])], "refers");
 }
 
 #[test]
-#[ignore = "fails until type tree validation lands"]
 fn test_subtype_list_referring_to_an_earlier_entry_is_refused() {
     assert_refused(vec![structure(&[1]), structure(&[0])], "refers");
     assert_refused(
@@ -139,7 +139,6 @@ fn test_subtype_index_past_the_list_is_refused() {
 }
 
 #[test]
-#[ignore = "fails until type tree validation lands"]
 fn test_node_with_two_parents_is_refused() {
     assert_refused(vec![structure(&[1, 1]), leaf()], "more than once");
     assert_refused(
@@ -162,7 +161,6 @@ fn test_node_with_two_parents_is_refused() {
 }
 
 #[test]
-#[ignore = "fails until type tree validation lands"]
 fn test_shared_subtrees_cannot_multiply_the_tree() {
     let rungs = 200;
     let mut types = vec![structure(&[1])];
@@ -175,7 +173,6 @@ fn test_shared_subtrees_cannot_multiply_the_tree() {
 }
 
 #[test]
-#[ignore = "fails until type tree validation lands"]
 fn test_tree_deeper_than_the_limit_is_refused() {
     assert_refused(chain(MAX_TYPE_TREE_DEPTH + 1), "deeper");
     assert_refused(chain(1_000_000), "deeper");

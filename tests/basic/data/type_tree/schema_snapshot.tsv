@@ -96,9 +96,9 @@ tests/integration/data/TestOrcFile.testSeek.orc	2dfd2ef99da23ffc
 tests/integration/data/TestOrcFile.testSnappy.orc	3df8bc783bde3db8
 tests/integration/data/TestOrcFile.testStringAndBinaryStatistics.orc	e2b9946bce990a3a
 tests/integration/data/TestOrcFile.testStripeLevelStats.orc	3df8bc783bde3db8
-tests/integration/data/TestOrcFile.testTimestamp.orc	panic
+tests/integration/data/TestOrcFile.testTimestamp.orc	error
 tests/integration/data/TestOrcFile.testUnionAndTimestamp.orc	35419c38da7ad0be
-tests/integration/data/TestOrcFile.testWithoutCompressionBlockSize.orc	panic
+tests/integration/data/TestOrcFile.testWithoutCompressionBlockSize.orc	error
 tests/integration/data/TestOrcFile.testWithoutIndex.orc	3df8bc783bde3db8
 tests/integration/data/TestStringDictionary.testRowIndex.orc	3644d84e78c176ae
 tests/integration/data/TestVectorOrcFile.testLz4.orc	07f50035d8cb7fbd
