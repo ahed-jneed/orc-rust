@@ -157,7 +157,7 @@ fn check_property_dir(dir: &Path, batch_sizes: &[usize]) -> usize {
             .map(|line| (line != "null").then(|| line.parse().unwrap()))
             .collect();
         for &batch_size in batch_sizes {
-            let actual = read_unit(path, batch_size, time_unit.clone(), time_zone);
+            let actual = read_unit(path, batch_size, time_unit, time_zone);
             assert_eq!(actual.len(), expected.len(), "{path:?} batch {batch_size}");
             if let Some(row) = (0..actual.len()).find(|&i| actual[i] != expected[i]) {
                 panic!(
