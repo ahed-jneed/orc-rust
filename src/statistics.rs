@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use snafu::OptionExt;
+
 use crate::{error, proto};
 
 /// Contains statistics for a specific column, for the entire file
@@ -139,9 +141,14 @@ impl TryFrom<&proto::ColumnStatistics> for ColumnStatistics {
             })
         } else if let Some(stats) = &value.bucket_statistics {
             // TODO: false count?
-            Some(TypeStatistics::Bucket {
-                true_count: stats.count[0], // TODO: safety check this
-            })
+            let true_count = stats
+                .count
+                .first()
+                .copied()
+                .context(error::UnexpectedSnafu {
+                    msg: "Boolean column statistics must hold a true count",
+                })?;
+            Some(TypeStatistics::Bucket { true_count })
         } else if let Some(stats) = &value.decimal_statistics {
             Some(TypeStatistics::Decimal {
                 min: stats.minimum().to_owned(),
@@ -185,7 +192,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "panics until boolean statistics without a count are refused"]
     fn test_boolean_statistics_without_a_count_are_refused() {
         let stats = proto::ColumnStatistics {
             number_of_values: Some(3),
