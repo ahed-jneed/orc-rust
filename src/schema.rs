@@ -30,6 +30,10 @@ use arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit, Union
 const UNSPECIFIED_DECIMAL_PRECISION: u32 = 38;
 const UNSPECIFIED_DECIMAL_SCALE: u32 = 10;
 
+/// Deepest nesting of types accepted below the root type. A type tree with a
+/// node nested deeper than this is refused when the file footer is read.
+pub const MAX_TYPE_TREE_DEPTH: usize = 128;
+
 /// Configuration for timestamp precision when converting ORC timestamps to Arrow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TimestampPrecision {
