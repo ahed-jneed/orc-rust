@@ -25,7 +25,10 @@ fn basic_path(path: &str) -> String {
     format!("{dir}/tests/basic/data/{path}")
 }
 
-fn read_all(name: &str, batch_size: usize) -> Result<Vec<Vec<Option<i128>>>, Box<dyn std::error::Error>> {
+fn read_all(
+    name: &str,
+    batch_size: usize,
+) -> Result<Vec<Vec<Option<i128>>>, Box<dyn std::error::Error>> {
     let f = File::open(basic_path(&format!("decimal_layout_{name}.orc"))).unwrap();
     let reader = ArrowReaderBuilder::try_new(f)?
         .with_batch_size(batch_size)

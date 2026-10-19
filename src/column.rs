@@ -18,7 +18,10 @@
 use std::sync::Arc;
 
 use crate::encoding::integer::RleVersion;
-use crate::proto::{column_encoding::Kind as ProtoColumnKind, ColumnEncoding, StripeFooter};
+use crate::proto::{
+    column_encoding::Kind as ProtoColumnKind, stream::Kind as ProtoStreamKind, ColumnEncoding,
+    StripeFooter,
+};
 use crate::schema::DataType;
 
 #[derive(Clone, Debug)]
@@ -47,6 +50,18 @@ impl Column {
     pub fn encoding(&self) -> ColumnEncoding {
         let column = self.data_type.column_index();
         self.footer.columns[column].clone()
+    }
+
+    /// The kinds of all streams the stripe footer lists for this column, in footer order.
+    /// A kind this reader does not know is reported as `None`.
+    pub fn stream_kinds(&self) -> Vec<Option<ProtoStreamKind>> {
+        let column = self.column_id();
+        self.footer
+            .streams
+            .iter()
+            .filter(|stream| stream.column() == column)
+            .map(|stream| ProtoStreamKind::try_from(stream.kind.unwrap_or_default()).ok())
+            .collect()
     }
 
     pub fn rle_version(&self) -> RleVersion {

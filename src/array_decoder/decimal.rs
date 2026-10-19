@@ -26,14 +26,15 @@ use snafu::{ensure, OptionExt, ResultExt};
 use crate::encoding::decimal::UnboundedVarintStreamDecoder;
 use crate::encoding::integer::{get_signed_int_decoder, RleVersion};
 use crate::encoding::PrimitiveValueDecoder;
-use crate::error::{ArrowSnafu, DecimalScaleLossSnafu, OutOfSpecSnafu};
+use crate::error::{ArrowSnafu, DecimalScaleLossSnafu, InvalidDecimalTypeSnafu, OutOfSpecSnafu};
+use crate::proto::column_encoding::Kind as EncodingKind;
 use crate::proto::stream::Kind;
 use crate::stripe::Stripe;
 use crate::{column::Column, error::Result};
 
 use super::{ArrayBatchDecoder, PresentDecoder, PrimitiveArrayDecoder};
 
-const MAX_DECIMAL64_PRECISION: u32 = 18;
+const MAX_DECIMAL64_PRECISION: u8 = 18;
 
 struct Decimal64Decoder {
     iter: Box<dyn PrimitiveValueDecoder<i64> + Send>,
@@ -54,28 +55,29 @@ impl PrimitiveValueDecoder<i128> for Decimal64Decoder {
     }
 }
 
+enum DecimalLayout {
+    Decimal64,
+    Legacy,
+}
+
 pub fn new_decimal_decoder(
     column: &Column,
     stripe: &Stripe,
     precision: u32,
     fixed_scale: u32,
     scale_unspecified: bool,
-) -> Box<dyn ArrayBatchDecoder> {
-    if precision <= MAX_DECIMAL64_PRECISION
-        && stripe
-            .stream_map()
-            .get_opt(column, Kind::Secondary)
-            .is_none()
-    {
+) -> Result<Box<dyn ArrayBatchDecoder>> {
+    let (precision, scale) = decimal_type(column, precision, fixed_scale)?;
+    if let DecimalLayout::Decimal64 = decimal_layout(column, stripe, precision)? {
         let data = stripe.stream_map().get(column, Kind::Data);
         let iter = get_signed_int_decoder::<i64>(data, RleVersion::V2);
         let present = PresentDecoder::from_stripe(stripe, column);
-        return Box::new(DecimalArrayDecoder::new(
-            precision as u8,
-            fixed_scale as i8,
+        return Ok(Box::new(DecimalArrayDecoder::new(
+            precision,
+            scale,
             Box::new(Decimal64Decoder { iter }),
             present,
-        ));
+        )));
     }
 
     let varint_iter = stripe.stream_map().get(column, Kind::Data);
@@ -93,17 +95,108 @@ pub fn new_decimal_decoder(
         fixed_scale,
         unspecified_scale: scale_unspecified.then(|| UnspecifiedScale {
             column: column.name().to_string(),
-            precision: precision as u8,
+            precision,
         }),
     };
     let iter = Box::new(iter);
 
-    Box::new(DecimalArrayDecoder::new(
-        precision as u8,
-        fixed_scale as i8,
-        iter,
-        present,
-    ))
+    Ok(Box::new(DecimalArrayDecoder::new(
+        precision, scale, iter, present,
+    )))
+}
+
+fn decimal_type(column: &Column, precision: u32, scale: u32) -> Result<(u8, i8)> {
+    let invalid = || {
+        InvalidDecimalTypeSnafu {
+            column: column.name().to_string(),
+            precision,
+            scale,
+        }
+        .build()
+    };
+    let narrow_precision = u8::try_from(precision)
+        .ok()
+        .filter(|precision| (1..=Decimal128Type::MAX_PRECISION).contains(precision))
+        .ok_or_else(invalid)?;
+    let narrow_scale = u8::try_from(scale)
+        .ok()
+        .filter(|scale| *scale <= narrow_precision)
+        .and_then(|scale| i8::try_from(scale).ok())
+        .ok_or_else(invalid)?;
+    Ok((narrow_precision, narrow_scale))
+}
+
+fn decimal_layout(column: &Column, stripe: &Stripe, precision: u8) -> Result<DecimalLayout> {
+    let mut present = 0;
+    let mut data = 0;
+    let mut secondary = 0;
+    let mut row_index = 0;
+    let mut bloom_filter = 0;
+    let mut bloom_filter_utf8 = 0;
+    for kind in column.stream_kinds() {
+        let count = match kind {
+            Some(Kind::Present) => &mut present,
+            Some(Kind::Data) => &mut data,
+            Some(Kind::Secondary) => &mut secondary,
+            Some(Kind::RowIndex) => &mut row_index,
+            Some(Kind::BloomFilter) => &mut bloom_filter,
+            Some(Kind::BloomFilterUtf8) => &mut bloom_filter_utf8,
+            other => {
+                return OutOfSpecSnafu {
+                    msg: format!(
+                        "decimal column '{}' has an unexpected {other:?} stream",
+                        column.name()
+                    ),
+                }
+                .fail()
+            }
+        };
+        *count += 1;
+        ensure!(
+            *count == 1,
+            OutOfSpecSnafu {
+                msg: format!(
+                    "decimal column '{}' has more than one {kind:?} stream",
+                    column.name()
+                ),
+            }
+        );
+    }
+    if precision <= MAX_DECIMAL64_PRECISION && stripe.decimal64_file() {
+        ensure!(
+            secondary == 0,
+            OutOfSpecSnafu {
+                msg: format!(
+                    "decimal column '{}' of precision {precision} has a SECONDARY stream in a Decimal64 file",
+                    column.name()
+                ),
+            }
+        );
+        ensure!(
+            matches!(
+                column.encoding().kind(),
+                EncodingKind::Direct | EncodingKind::DirectV2
+            ),
+            OutOfSpecSnafu {
+                msg: format!(
+                    "decimal column '{}' of a Decimal64 file has encoding {:?}",
+                    column.name(),
+                    column.encoding().kind()
+                ),
+            }
+        );
+        return Ok(DecimalLayout::Decimal64);
+    }
+    ensure!(
+        data == secondary,
+        OutOfSpecSnafu {
+            msg: format!(
+                "decimal column '{}' needs both a DATA and a SECONDARY stream or neither",
+                column.name()
+            ),
+        }
+    );
+    Ok(DecimalLayout::Legacy)
 }
 
 /// Wrapper around PrimitiveArrayDecoder to allow specifying the precision and scale
