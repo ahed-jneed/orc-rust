@@ -52,6 +52,7 @@ pub struct StripeMetadata {
 
 /// A stripe retains selected streams in memory while its arrays are decoded.
 /// Bound the aggregate rather than only each individual stream request.
+const UNSTABLE_PRE_2_0_VERSION: &str = "1.9999";
 const MAX_STRIPE_STREAM_BYTES: u64 = 512 * 1024 * 1024;
 
 impl StripeMetadata {
@@ -131,6 +132,7 @@ pub struct Stripe {
     stream_map: StreamMap,
     number_of_rows: usize,
     tz: Option<chrono_tz::Tz>,
+    decimal64_file: bool,
 }
 
 impl Stripe {
@@ -203,6 +205,7 @@ impl Stripe {
                 .build()
             })?,
             tz,
+            decimal64_file: is_decimal64_file(file_metadata),
         })
     }
 
@@ -282,6 +285,7 @@ impl Stripe {
                 .build()
             })?,
             tz,
+            decimal64_file: is_decimal64_file(file_metadata),
         })
     }
 
@@ -295,6 +299,12 @@ impl Stripe {
 
     pub fn columns(&self) -> &[Column] {
         &self.columns
+    }
+
+    /// Whether the postscript version marks the file as UNSTABLE-PRE-2.0, the format that
+    /// stores decimals up to precision 18 as a single signed integer DATA stream.
+    pub fn decimal64_file(&self) -> bool {
+        self.decimal64_file
     }
 
     pub fn writer_tz(&self) -> Option<chrono_tz::Tz> {
@@ -347,6 +357,10 @@ impl Stripe {
             rows_per_group,
         )
     }
+}
+
+fn is_decimal64_file(file_metadata: &FileMetadata) -> bool {
+    file_metadata.file_format_version() == UNSTABLE_PRE_2_0_VERSION
 }
 
 #[derive(Debug)]
