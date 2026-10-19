@@ -243,6 +243,16 @@ def main(out):
         [(Decimal("0.34"),), (Decimal("-1.50"),), (Decimal("99.99"),)],
     )
     legacy_data = open(legacy, "rb").read()
+    bloom = f"{out}/decimal_layout_bloom_filter.orc"
+    with open(bloom, "wb") as f:
+        with pyorc.Writer(
+            f,
+            "struct<d:decimal(5,2)>",
+            compression=pyorc.CompressionKind.NONE,
+            bloom_filter_columns=["d"],
+        ) as w:
+            for v in ["0.34", "-1.50", "99.99"]:
+                w.write((Decimal(v),))
     emit("legacy_secondary_as_data", rewrite(legacy_data, stripe_footer=restream(1, SECONDARY, DATA)))
     emit("legacy_extra_secondary", rewrite(legacy_data, stripe_footer=restream(1, ROW_INDEX, SECONDARY)))
     emit("legacy_extra_data", rewrite(legacy_data, stripe_footer=restream(1, ROW_INDEX, DATA)))
