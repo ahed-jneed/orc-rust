@@ -294,3 +294,32 @@ fn test_decimal_layout_refuses_decimal64_scale_13_above_precision() {
         "invalid decimal type (precision 12, scale 13)",
     );
 }
+
+#[cfg(feature = "async")]
+async fn read_all_async(path: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    use futures_util::TryStreamExt;
+
+    let f = tokio::fs::File::open(basic_path(path)).await?;
+    let reader = ArrowReaderBuilder::try_new_async(f).await?.build_async();
+    let batches = reader.try_collect::<Vec<_>>().await?;
+    Ok(batches.iter().map(|batch| batch.num_rows()).sum())
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn test_decimal_layout_async_reads_decimal64_file() {
+    assert_eq!(read_all_async("decimal64_v2.orc").await.unwrap(), 10);
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn test_decimal_layout_async_refuses_damaged_decimal64_file() {
+    let error = read_all_async("decimal_layout_d64_extra_secondary.orc")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("SECONDARY stream in a Decimal64 file"),
+        "{error}"
+    );
+}
