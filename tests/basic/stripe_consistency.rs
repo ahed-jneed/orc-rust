@@ -1169,19 +1169,17 @@ fn test_unpacked_repeated_fields_read() {
 }
 
 #[test]
-#[ignore = "repeated singular protobuf fields are not refused yet"]
 fn test_footer_field_that_occurs_twice_is_refused() {
     let mut file = two_stripes();
-    file.footer_edit = Some(|footer| [footer, field_varint(8, 100)].concat());
+    file.footer_edit = Some(|footer| [footer, field_varint(6, 9)].concat());
     let error = read(file.render(), 8192).unwrap_err();
     assert!(
-        error.contains("field 8 of the footer occurs more than once"),
+        error.contains("field 6 of the footer occurs more than once"),
         "{error}"
     );
 }
 
 #[test]
-#[ignore = "repeated singular protobuf fields are not refused yet"]
 fn test_type_kind_that_occurs_twice_is_refused() {
     let mut file = two_stripes();
     file.footer_edit = Some(|footer| append_to_field(&footer, 4, 1, &field_varint(1, 0)));
@@ -1193,7 +1191,6 @@ fn test_type_kind_that_occurs_twice_is_refused() {
 }
 
 #[test]
-#[ignore = "repeated singular protobuf fields are not refused yet"]
 fn test_stripe_information_field_that_occurs_twice_is_refused() {
     let mut file = two_stripes();
     file.footer_edit = Some(|footer| append_to_field(&footer, 3, 1, &field_varint(5, 1)));
@@ -1205,7 +1202,6 @@ fn test_stripe_information_field_that_occurs_twice_is_refused() {
 }
 
 #[test]
-#[ignore = "repeated singular protobuf fields are not refused yet"]
 fn test_postscript_field_that_occurs_twice_is_refused() {
     let mut file = two_stripes();
     file.postscript_edit = Some(|postscript| [postscript, field_varint(2, 0)].concat());
@@ -1217,7 +1213,6 @@ fn test_postscript_field_that_occurs_twice_is_refused() {
 }
 
 #[test]
-#[ignore = "repeated singular protobuf fields are not refused yet"]
 fn test_stream_field_that_occurs_twice_is_refused() {
     let mut file = two_stripes();
     file.stripes[0].footer_edit =
@@ -1226,7 +1221,6 @@ fn test_stream_field_that_occurs_twice_is_refused() {
 }
 
 #[test]
-#[ignore = "repeated singular protobuf fields are not refused yet"]
 fn test_column_encoding_field_that_occurs_twice_is_refused() {
     let mut file = two_stripes();
     file.stripes[1].footer_edit =
@@ -1238,7 +1232,6 @@ fn test_column_encoding_field_that_occurs_twice_is_refused() {
 }
 
 #[test]
-#[ignore = "repeated singular protobuf fields are not refused yet"]
 fn test_stripe_footer_timezone_that_occurs_twice_is_refused() {
     let mut file = two_stripes();
     file.stripes[0].footer_edit =
@@ -1250,7 +1243,6 @@ fn test_stripe_footer_timezone_that_occurs_twice_is_refused() {
 }
 
 #[test]
-#[ignore = "dictionary encodings are not required to state a size yet"]
 fn test_dictionary_encoding_without_a_size_is_refused() {
     let mut stripe = dictionary_stripe(2, &[1, 2], b"xyz", &[0, 1, 1, 0, 1]);
     stripe.footer.columns[2].dictionary_size = None;
@@ -1259,7 +1251,6 @@ fn test_dictionary_encoding_without_a_size_is_refused() {
 }
 
 #[test]
-#[ignore = "dictionary data under a direct encoding is not refused yet"]
 fn test_dictionary_data_under_a_direct_encoding_is_refused() {
     let mut stripe = dictionary_stripe(2, &[1, 2], b"xyz", &[0, 1, 1, 0, 1]);
     stripe.footer.columns[2] = encoding(EncodingKind::Direct, None);
@@ -1309,7 +1300,6 @@ fn test_integer_statistics_within_the_column_type_read() {
 }
 
 #[test]
-#[ignore = "integer statistics are not compared with the column type's range yet"]
 fn test_integer_statistics_beyond_the_column_type_are_refused() {
     for (minimum, maximum) in [(-129, 5), (0, 128), (i64::MIN, 5), (0, i64::MAX)] {
         let error = read(tinyint_file(minimum, maximum), 8192).unwrap_err();
@@ -1321,7 +1311,6 @@ fn test_integer_statistics_beyond_the_column_type_are_refused() {
 }
 
 #[test]
-#[ignore = "integer statistics are not compared with the column type's range yet"]
 fn test_short_and_int_statistics_beyond_the_column_type_are_refused() {
     let file = |kind: TypeKind, minimum: i64, maximum: i64| {
         let mut file = OrcFile::new(vec![numbered_rows(0, 5)]);

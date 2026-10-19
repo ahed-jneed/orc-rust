@@ -348,6 +348,12 @@ fn validate_type_tree(types: &[proto::Type]) -> Result<()> {
             depths[subtype] = Some(depth + 1);
         }
     }
+    if let Some(column_index) = depths.iter().position(Option::is_none) {
+        return UnexpectedSnafu {
+            msg: format!("Column index {column_index} is not referred to by any type"),
+        }
+        .fail();
+    }
     Ok(())
 }
 

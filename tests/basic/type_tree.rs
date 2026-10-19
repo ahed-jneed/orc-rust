@@ -268,7 +268,6 @@ fn test_nested_compound_types_are_read() {
 }
 
 #[test]
-#[ignore = "types that nothing refers to are not refused yet"]
 fn test_types_that_nothing_refers_to_are_refused() {
     assert_refused(
         vec![structure(&[1]), leaf(), leaf()],

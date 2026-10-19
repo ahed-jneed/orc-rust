@@ -55,6 +55,7 @@ use crate::proto::{self, CompressionKind, Footer, Metadata, PostScript};
 use crate::schema::RootDataType;
 use crate::statistics::ColumnStatistics;
 use crate::stripe::StripeMetadata;
+use crate::wire::{FOOTER, POSTSCRIPT};
 
 use crate::reader::ChunkReader;
 
@@ -220,6 +221,8 @@ pub fn read_metadata<R: ChunkReader>(reader: &mut R) -> Result<FileMetadata> {
     }
     let postscript = PostScript::decode(&tail_bytes[tail_bytes.len() - postscript_len as usize..])
         .context(error::DecodeProtoSnafu)?;
+    POSTSCRIPT
+        .ensure_singular_fields_once(&tail_bytes[tail_bytes.len() - postscript_len as usize..])?;
     validate_postscript(&postscript)?;
     let compression =
         Compression::from_proto(postscript.compression(), postscript.compression_block_size);
@@ -318,6 +321,8 @@ pub async fn read_metadata_async<R: super::AsyncChunkReader>(
     }
     let postscript = PostScript::decode(&tail_bytes[tail_bytes.len() - postscript_len as usize..])
         .context(error::DecodeProtoSnafu)?;
+    POSTSCRIPT
+        .ensure_singular_fields_once(&tail_bytes[tail_bytes.len() - postscript_len as usize..])?;
     validate_postscript(&postscript)?;
     let compression =
         Compression::from_proto(postscript.compression(), postscript.compression_block_size);
@@ -513,6 +518,26 @@ fn validate_statistics(
             Kind::Timestamp | Kind::TimestampInstant => 7,
             Kind::Struct | Kind::List | Kind::Map | Kind::Union => present.len(),
         };
+        let range = match ty.kind() {
+            Kind::Byte => i64::from(i8::MIN)..=i64::from(i8::MAX),
+            Kind::Short => i64::from(i16::MIN)..=i64::from(i16::MAX),
+            Kind::Int => i64::from(i32::MIN)..=i64::from(i32::MAX),
+            _ => i64::MIN..=i64::MAX,
+        };
+        ensure!(
+            statistics.int_statistics.as_ref().map_or(true, |int| {
+                int.minimum
+                    .iter()
+                    .chain(&int.maximum)
+                    .all(|v| range.contains(v))
+            }),
+            OutOfSpecSnafu {
+                msg: format!(
+                    "column {column} of type {:?} has statistics outside the type's range",
+                    ty.kind()
+                )
+            }
+        );
         ensure!(
             present
                 .iter()
@@ -537,6 +562,7 @@ fn deserialize_footer(
     let buffer = read_decompressed_section_with_limit(bytes, compression, limit)?;
     let size = buffer.len();
     let footer = Footer::decode(buffer.as_slice()).context(error::DecodeProtoSnafu)?;
+    FOOTER.ensure_singular_fields_once(&buffer)?;
     Ok((footer, size))
 }
 

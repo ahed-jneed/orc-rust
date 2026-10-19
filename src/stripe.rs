@@ -35,6 +35,7 @@ use crate::{
     reader::{metadata::FileMetadata, ChunkReader},
     schema::RootDataType,
     statistics::ColumnStatistics,
+    wire::STRIPE_FOOTER,
 };
 
 /// Stripe metadata parsed from the file tail metadata sections.
@@ -412,7 +413,9 @@ fn deserialize_stripe_footer(
     compression: Option<Compression>,
 ) -> Result<StripeFooter> {
     let buffer = read_decompressed_section(bytes, compression)?;
-    StripeFooter::decode(buffer.as_slice()).context(error::DecodeProtoSnafu)
+    let footer = StripeFooter::decode(buffer.as_slice()).context(error::DecodeProtoSnafu)?;
+    STRIPE_FOOTER.ensure_singular_fields_once(&buffer)?;
+    Ok(footer)
 }
 
 /// Refuses a stripe footer that contradicts the file's type tree or the stripe's own
@@ -453,7 +456,10 @@ fn validate_stripe_footer(
                     )
                 }
             );
-            let dictionary_size = u64::from(encoding.dictionary_size.unwrap_or_default());
+            let dictionary_size =
+                u64::from(encoding.dictionary_size.context(error::OutOfSpecSnafu {
+                    msg: format!("column {column} has no dictionary size"),
+                })?);
             ensure!(
                 dictionary_size <= info.number_of_rows(),
                 error::OutOfSpecSnafu {
@@ -483,6 +489,18 @@ fn validate_stripe_footer(
                 msg: format!("column {column} of type {type_kind:?} cannot have a {kind:?} stream")
             }
         );
+        if kind == Kind::DictionaryData {
+            ensure!(
+                footer.columns[column as usize].kind() == EncodingKind::Dictionary
+                    || footer.columns[column as usize].kind() == EncodingKind::DictionaryV2,
+                error::OutOfSpecSnafu {
+                    msg: format!(
+                        "column {column} has a DictionaryData stream but {:?} encoding",
+                        footer.columns[column as usize].kind()
+                    )
+                }
+            );
+        }
         ensure!(
             seen.insert((column, kind)),
             error::OutOfSpecSnafu {
