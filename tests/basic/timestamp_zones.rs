@@ -113,3 +113,9 @@ fn check_dir(dir: &str) -> usize {
 fn timestamp_dst_zones_after_2099() {
     assert_eq!(check_dir("timestamp_zones"), 14);
 }
+
+#[test]
+#[ignore = "Iqleb #1607: Java writer wall clocks before a zone's first transition"]
+fn timestamp_java_writer_zones_before_first_transition() {
+    assert_eq!(check_dir("timestamp_zones_java"), 6);
+}
