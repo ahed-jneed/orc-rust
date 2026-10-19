@@ -48,165 +48,249 @@ fn read_all(
     Ok(columns)
 }
 
-fn assert_refused(name: &str) {
+fn assert_refused(name: &str, message: &str) {
     for batch_size in [1, 8192] {
-        let result = read_all(name, batch_size);
+        let error = read_all(name, batch_size).expect_err(name).to_string();
         assert!(
-            result.is_err(),
-            "{name} batch {batch_size} read {:?}",
-            result.unwrap()
+            error.contains(message),
+            "{name} batch {batch_size}: {error}"
         );
     }
 }
 
-#[test]
-fn test_decimal_layout_legacy_reads() {
+fn assert_reads_legacy_values(name: &str) {
     for batch_size in [1, 8192] {
-        let columns = read_all("legacy", batch_size).unwrap();
+        let columns = read_all(name, batch_size).unwrap();
         assert_eq!(columns, vec![vec![Some(34), Some(-150), Some(9999)]]);
     }
 }
 
 #[test]
-#[ignore]
+fn test_decimal_layout_legacy_reads() {
+    assert_reads_legacy_values("legacy");
+}
+
+#[test]
+fn test_decimal_layout_bloom_filter_streams_are_allowed() {
+    assert_reads_legacy_values("bloom_filter");
+}
+
+#[test]
+fn test_decimal_layout_precision_19_in_decimal64_file_keeps_secondary_stream() {
+    assert_reads_legacy_values("legacy_p19_decimal64_version");
+}
+
+#[test]
 fn test_decimal_layout_refuses_secondary_kind_changed_to_data() {
-    assert_refused("legacy_secondary_as_data");
+    assert_refused(
+        "legacy_secondary_as_data",
+        "more than one Some(Data) stream",
+    );
 }
 
 #[test]
-#[ignore]
 fn test_decimal_layout_refuses_extra_secondary_stream() {
-    assert_refused("legacy_extra_secondary");
+    assert_refused(
+        "legacy_extra_secondary",
+        "more than one Some(Secondary) stream",
+    );
 }
 
 #[test]
-#[ignore]
 fn test_decimal_layout_refuses_extra_data_stream() {
-    assert_refused("legacy_extra_data");
+    assert_refused("legacy_extra_data", "more than one Some(Data) stream");
 }
 
 #[test]
-#[ignore]
+fn test_decimal_layout_refuses_triple_data_stream() {
+    assert_refused("legacy_triple_data", "more than one Some(Data) stream");
+}
+
+#[test]
 fn test_decimal_layout_refuses_unexpected_stream_kind() {
-    assert_refused("legacy_extra_length");
+    assert_refused("legacy_extra_length", "unexpected Some(Length) stream");
 }
 
 #[test]
 fn test_decimal_layout_refuses_data_kind_changed_to_secondary() {
-    assert_refused("legacy_data_as_secondary");
+    assert_refused(
+        "legacy_data_as_secondary",
+        "more than one Some(Secondary) stream",
+    );
 }
 
 #[test]
 fn test_decimal_layout_refuses_secondary_stream_missing() {
-    assert_refused("legacy_secondary_missing");
+    assert_refused(
+        "legacy_secondary_as_bloom_filter",
+        "needs both a DATA and a SECONDARY",
+    );
 }
 
 #[test]
-#[ignore]
+fn test_decimal_layout_refuses_data_stream_missing() {
+    assert_refused(
+        "legacy_data_as_bloom_filter",
+        "needs both a DATA and a SECONDARY",
+    );
+}
+
+#[test]
+fn test_decimal_layout_refuses_secondary_kind_changed_to_length() {
+    assert_refused("legacy_secondary_missing", "unexpected Some(Length) stream");
+}
+
+#[test]
 fn test_decimal_layout_refuses_decimal64_file_version_with_secondary() {
-    assert_refused("legacy_decimal64_version");
+    assert_refused(
+        "legacy_decimal64_version",
+        "SECONDARY stream in a Decimal64 file",
+    );
+}
+
+#[test]
+fn test_decimal_layout_refuses_precision_18_decimal64_file_version_with_secondary() {
+    assert_refused(
+        "legacy_p18_decimal64_version",
+        "SECONDARY stream in a Decimal64 file",
+    );
 }
 
 #[test]
 fn test_decimal_layout_refuses_scale_13_above_precision() {
-    assert_refused("scale_13");
+    assert_refused("scale_13", "invalid decimal type (precision 12, scale 13)");
 }
 
 #[test]
 fn test_decimal_layout_refuses_scale_127_above_precision() {
-    assert_refused("scale_127");
+    assert_refused(
+        "scale_127",
+        "invalid decimal type (precision 12, scale 127)",
+    );
 }
 
 #[test]
 fn test_decimal_layout_refuses_scale_128_wraps_i8() {
-    assert_refused("scale_128");
+    assert_refused(
+        "scale_128",
+        "invalid decimal type (precision 12, scale 128)",
+    );
 }
 
 #[test]
 fn test_decimal_layout_refuses_scale_255_wraps_i8() {
-    assert_refused("scale_255");
+    assert_refused(
+        "scale_255",
+        "invalid decimal type (precision 12, scale 255)",
+    );
 }
 
 #[test]
 fn test_decimal_layout_refuses_scale_256_wraps_u8() {
-    assert_refused("scale_256");
+    assert_refused(
+        "scale_256",
+        "invalid decimal type (precision 12, scale 256)",
+    );
 }
 
 #[test]
 fn test_decimal_layout_refuses_scale_above_precision() {
-    assert_refused("scale_above_precision");
+    assert_refused(
+        "scale_above_precision",
+        "invalid decimal type (precision 12, scale 13)",
+    );
 }
 
 #[test]
 fn test_decimal_layout_refuses_precision_39() {
-    assert_refused("precision_39");
+    assert_refused(
+        "precision_39",
+        "invalid decimal type (precision 39, scale 2)",
+    );
 }
 
 #[test]
 fn test_decimal_layout_refuses_precision_256_wraps_u8() {
-    assert_refused("precision_256");
+    assert_refused(
+        "precision_256",
+        "invalid decimal type (precision 256, scale 2)",
+    );
 }
 
 #[test]
 fn test_decimal_layout_refuses_unspecified_precision_scale_128() {
-    assert_refused("precision_unspecified_scale_128");
+    assert_refused(
+        "precision_unspecified_scale_128",
+        "invalid decimal type (precision 38, scale 128)",
+    );
 }
 
 #[test]
 fn test_decimal_layout_refuses_decimal64_extra_secondary_stream() {
-    assert_refused("d64_extra_secondary");
+    assert_refused(
+        "d64_extra_secondary",
+        "SECONDARY stream in a Decimal64 file",
+    );
 }
 
 #[test]
-#[ignore]
 fn test_decimal_layout_refuses_decimal64_duplicate_data_stream() {
-    assert_refused("d64_extra_data");
+    assert_refused("d64_extra_data", "more than one Some(Data) stream");
 }
 
 #[test]
-#[ignore]
 fn test_decimal_layout_refuses_decimal64_unexpected_stream_kind() {
-    assert_refused("d64_extra_length");
+    assert_refused("d64_extra_length", "unexpected Some(Length) stream");
 }
 
 #[test]
 fn test_decimal_layout_refuses_decimal64_data_kind_changed_to_secondary() {
-    assert_refused("d64_data_as_secondary");
+    assert_refused(
+        "d64_data_as_secondary",
+        "SECONDARY stream in a Decimal64 file",
+    );
 }
 
 #[test]
 fn test_decimal_layout_refuses_decimal64_data_kind_changed_to_length() {
-    assert_refused("d64_data_as_length");
+    assert_refused("d64_data_as_length", "unexpected Some(Length) stream");
 }
 
 #[test]
 fn test_decimal_layout_refuses_decimal64_dictionary_encoding() {
-    assert_refused("d64_dictionary_encoding");
+    assert_refused("d64_dictionary_encoding", "has encoding DictionaryV2");
 }
 
 #[test]
-#[ignore]
 fn test_decimal_layout_refuses_decimal64_streams_in_legacy_version_file() {
-    assert_refused("d64_legacy_version");
+    assert_refused("d64_legacy_version", "needs both a DATA and a SECONDARY");
 }
 
 #[test]
-#[ignore]
 fn test_decimal_layout_refuses_decimal64_file_wide_column_duplicate_data_stream() {
-    assert_refused("d64_wide_extra_data");
+    assert_refused("d64_wide_extra_data", "more than one Some(Data) stream");
 }
 
 #[test]
 fn test_decimal_layout_refuses_decimal64_scale_128_wraps_i8() {
-    assert_refused("d64_scale_128");
+    assert_refused(
+        "d64_scale_128",
+        "invalid decimal type (precision 12, scale 128)",
+    );
 }
 
 #[test]
 fn test_decimal_layout_refuses_decimal64_scale_256_wraps_u8() {
-    assert_refused("d64_scale_256");
+    assert_refused(
+        "d64_scale_256",
+        "invalid decimal type (precision 12, scale 256)",
+    );
 }
 
 #[test]
 fn test_decimal_layout_refuses_decimal64_scale_13_above_precision() {
-    assert_refused("d64_scale_13");
+    assert_refused(
+        "d64_scale_13",
+        "invalid decimal type (precision 12, scale 13)",
+    );
 }

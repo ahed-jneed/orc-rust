@@ -146,3 +146,44 @@ impl Column {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::Stream;
+
+    #[test]
+    fn stream_kinds_of_the_column_only() {
+        let stream = |column: u32, kind: Option<i32>| Stream {
+            kind,
+            column: Some(column),
+            length: Some(0),
+        };
+        let footer = StripeFooter {
+            streams: vec![
+                stream(1, Some(ProtoStreamKind::Data as i32)),
+                stream(2, Some(ProtoStreamKind::Secondary as i32)),
+                stream(1, None),
+                stream(1, Some(1000)),
+                stream(1, Some(ProtoStreamKind::RowIndex as i32)),
+            ],
+            ..Default::default()
+        };
+        let data_type = DataType::Decimal {
+            column_index: 1,
+            precision: 10,
+            scale: 2,
+            scale_unspecified: false,
+        };
+        let column = Column::new("d".to_string(), data_type, Arc::new(footer));
+        assert_eq!(
+            column.stream_kinds(),
+            vec![
+                Some(ProtoStreamKind::Data),
+                Some(ProtoStreamKind::Present),
+                None,
+                Some(ProtoStreamKind::RowIndex)
+            ]
+        );
+    }
+}

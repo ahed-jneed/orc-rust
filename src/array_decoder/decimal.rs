@@ -350,6 +350,50 @@ fn scale_factor_pow10(exponent: u32) -> Result<i128> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::StripeFooter;
+    use crate::schema::DataType;
+
+    fn decimal_column() -> Column {
+        let data_type = DataType::Decimal {
+            column_index: 0,
+            precision: 10,
+            scale: 2,
+            scale_unspecified: false,
+        };
+        Column::new(
+            "d".to_string(),
+            data_type,
+            Arc::new(StripeFooter::default()),
+        )
+    }
+
+    #[test]
+    fn decimal_type_bounds() {
+        let column = decimal_column();
+        assert_eq!(decimal_type(&column, 1, 0).unwrap(), (1, 0));
+        assert_eq!(decimal_type(&column, 1, 1).unwrap(), (1, 1));
+        assert_eq!(decimal_type(&column, 38, 38).unwrap(), (38, 38));
+        assert_eq!(decimal_type(&column, 12, 2).unwrap(), (12, 2));
+        for (precision, scale) in [
+            (0, 0),
+            (1, 2),
+            (12, 13),
+            (12, 127),
+            (12, 128),
+            (12, 255),
+            (12, 256),
+            (38, 39),
+            (39, 2),
+            (256, 0),
+            (u32::MAX, 0),
+            (12, u32::MAX),
+        ] {
+            assert!(
+                decimal_type(&column, precision, scale).is_err(),
+                "({precision}, {scale})"
+            );
+        }
+    }
 
     #[test]
     fn negative_value_scale_is_rejected() {

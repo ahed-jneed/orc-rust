@@ -30,7 +30,7 @@ from decimal import Decimal
 
 import pyorc
 
-PRESENT, DATA, LENGTH, SECONDARY, ROW_INDEX = 0, 1, 2, 5, 6
+PRESENT, DATA, LENGTH, SECONDARY, ROW_INDEX, BLOOM_FILTER = 0, 1, 2, 5, 6, 7
 DIRECT, DIRECT_V2, DICTIONARY_V2 = 0, 2, 3
 DECIMAL = 14
 
@@ -236,6 +236,12 @@ def main(out):
         with open(f"{out}/decimal_layout_{name}.orc", "wb") as f:
             f.write(content)
 
+    for precision in [18, 19]:
+        write_pyorc(
+            f"{out}/decimal_layout_p{precision}_source.orc",
+            f"struct<d:decimal({precision},2)>",
+            [(Decimal("0.34"),), (Decimal("-1.50"),), (Decimal("99.99"),)],
+        )
     legacy = f"{out}/decimal_layout_legacy.orc"
     write_pyorc(
         legacy,
@@ -259,7 +265,12 @@ def main(out):
     emit("legacy_extra_length", rewrite(legacy_data, stripe_footer=restream(1, ROW_INDEX, LENGTH)))
     emit("legacy_data_as_secondary", rewrite(legacy_data, stripe_footer=restream(1, DATA, SECONDARY)))
     emit("legacy_secondary_missing", rewrite(legacy_data, stripe_footer=restream(1, SECONDARY, LENGTH)))
+    emit("legacy_secondary_as_bloom_filter", rewrite(legacy_data, stripe_footer=restream(1, SECONDARY, BLOOM_FILTER)))
+    emit("legacy_data_as_bloom_filter", rewrite(legacy_data, stripe_footer=restream(1, DATA, BLOOM_FILTER)))
+    emit("legacy_triple_data", rewrite(legacy_data, stripe_footer=lambda sf: (add_stream(1, DATA, 0)(sf), add_stream(1, DATA, 0)(sf))))
     emit("legacy_decimal64_version", rewrite(legacy_data, version=[1, 9999]))
+    for precision in [18, 19]:
+        emit(f"legacy_p{precision}_decimal64_version", rewrite(open(f"{out}/decimal_layout_p{precision}_source.orc", "rb").read(), version=[1, 9999]))
 
     wide = f"{out}/decimal_layout_scale_source.orc"
     write_pyorc(wide, "struct<d:decimal(12,2)>", [(Decimal("0.24"),)])
