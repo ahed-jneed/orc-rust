@@ -54,6 +54,8 @@ pub struct StripeMetadata {
 /// Bound the aggregate rather than only each individual stream request.
 const MAX_STRIPE_STREAM_BYTES: u64 = 512 * 1024 * 1024;
 
+const ORC_JAVA_WRITER: u32 = 0;
+
 impl StripeMetadata {
     pub fn offset(&self) -> u64 {
         self.offset
@@ -131,6 +133,7 @@ pub struct Stripe {
     stream_map: StreamMap,
     number_of_rows: usize,
     tz: Option<chrono_tz::Tz>,
+    java_writer: bool,
 }
 
 impl Stripe {
@@ -203,6 +206,7 @@ impl Stripe {
                 .build()
             })?,
             tz,
+            java_writer: file_metadata.writer() == Some(ORC_JAVA_WRITER),
         })
     }
 
@@ -282,6 +286,7 @@ impl Stripe {
                 .build()
             })?,
             tz,
+            java_writer: file_metadata.writer() == Some(ORC_JAVA_WRITER),
         })
     }
 
@@ -299,6 +304,10 @@ impl Stripe {
 
     pub fn writer_tz(&self) -> Option<chrono_tz::Tz> {
         self.tz
+    }
+
+    pub fn java_writer(&self) -> bool {
+        self.java_writer
     }
 
     /// Parse row indexes from the stripe index section

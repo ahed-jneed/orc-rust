@@ -55,6 +55,8 @@ const SECONDS_IN_DAY: i64 = 86_400;
 
 const END_OF_ZONE_RULES_SECONDS: i64 = 4_102_444_800;
 
+const JAVA_FIRST_TRANSITION_SECONDS: i64 = -2_208_988_800;
+
 const FOLD_FIRST_YEAR: i32 = 2072;
 const FOLD_LAST_YEAR: i32 = 2099;
 
@@ -62,10 +64,11 @@ const FOLD_LAST_YEAR: i32 = 2099;
 struct WriterZone {
     tz: Tz,
     repeats_yearly: bool,
+    java_standard_offset: Option<i64>,
 }
 
 impl WriterZone {
-    fn new(tz: Tz) -> Self {
+    fn new(tz: Tz, java_writer: bool) -> Self {
         let sample = |month| {
             NaiveDate::from_ymd_opt(FOLD_LAST_YEAR, month, 15)
                 .unwrap()
@@ -79,10 +82,21 @@ impl WriterZone {
         };
         let january = offset_in(1);
         let repeats_yearly = (2..=12).any(|month| offset_in(month) != january);
-        Self { tz, repeats_yearly }
+        let java_standard_offset =
+            java_writer.then(|| (1..=12).map(offset_in).min().map(i64::from).unwrap());
+        Self {
+            tz,
+            repeats_yearly,
+            java_standard_offset,
+        }
     }
 
     fn offset_seconds(&self, utc_seconds: i64) -> Option<i64> {
+        if let Some(standard_offset) = self.java_standard_offset {
+            if utc_seconds < JAVA_FIRST_TRANSITION_SECONDS {
+                return Some(standard_offset);
+            }
+        }
         let utc_seconds = if self.repeats_yearly && utc_seconds >= END_OF_ZONE_RULES_SECONDS {
             fold_into_rules(utc_seconds)?
         } else {
@@ -142,7 +156,7 @@ fn get_timestamp_decoder<T: ArrowTimestampType + Send>(
     match stripe.writer_tz() {
         Some(writer_tz) => Box::new(TimestampOffsetArrayDecoder {
             inner,
-            writer_zone: WriterZone::new(writer_tz),
+            writer_zone: WriterZone::new(writer_tz, stripe.java_writer()),
         }),
         None => Box::new(inner),
     }
@@ -245,7 +259,9 @@ pub fn new_timestamp_decoder(
                 column,
                 stripe,
                 seconds_since_unix_epoch,
-                stripe.writer_tz().map(WriterZone::new),
+                stripe
+                    .writer_tz()
+                    .map(|tz| WriterZone::new(tz, stripe.java_writer())),
             )))
         }
         _ => MismatchedSchemaSnafu {

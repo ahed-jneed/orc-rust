@@ -72,6 +72,7 @@ pub struct FileMetadata {
     user_custom_metadata: HashMap<String, Vec<u8>>,
     /// The maximum number of rows in each index entry (default 10,000)
     row_index_stride: Option<u32>,
+    writer: Option<u32>,
 }
 
 impl FileMetadata {
@@ -135,6 +136,7 @@ impl FileMetadata {
             stripes,
             user_custom_metadata,
             row_index_stride: footer.row_index_stride,
+            writer: footer.writer,
         })
     }
 
@@ -170,6 +172,10 @@ impl FileMetadata {
     /// If `None` is returned, it means row indexes are not enabled for this file.
     pub fn row_index_stride(&self) -> Option<usize> {
         self.row_index_stride.map(|s| s as usize)
+    }
+
+    pub fn writer(&self) -> Option<u32> {
+        self.writer
     }
 
     pub fn file_format_version(&self) -> &str {
