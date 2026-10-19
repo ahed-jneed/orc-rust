@@ -49,7 +49,7 @@ impl PrimitiveValueDecoder<i128> for Decimal64Decoder {
         let mut values = vec![0; out.len()];
         self.iter.decode(&mut values)?;
         for (o, v) in out.iter_mut().zip(values) {
-            *o = v as i128;
+            *o = i128::from(v);
         }
         Ok(())
     }
@@ -295,10 +295,9 @@ fn fix_i128_scale(
     varying_scale: i32,
     lossless_column: Option<&str>,
 ) -> Result<i128> {
-    // TODO: Verify with C++ impl in ORC repo, which does this cast
-    //       Not sure why scale stream can be signed if it gets casted to unsigned anyway
-    //       https://github.com/apache/orc/blob/0014bec1e4cdd1206f5bae4f5c2000b9300c6eb1/c%2B%2B/src/ColumnReader.cc#L1459-L1476
-    let varying_scale = varying_scale as u32;
+    let varying_scale = u32::try_from(varying_scale).ok().context(OutOfSpecSnafu {
+        msg: "decimal value has a negative scale",
+    })?;
     match fixed_scale.cmp(&varying_scale) {
         Ordering::Less => {
             // fixed_scale < varying_scale
@@ -346,4 +345,16 @@ fn scale_factor_pow10(exponent: u32) -> Result<i128> {
     10_i128.checked_pow(exponent).context(OutOfSpecSnafu {
         msg: "decimal scale difference is out of range",
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negative_value_scale_is_rejected() {
+        assert!(fix_i128_scale(0, 2, -1, Some("a")).is_err());
+        assert!(fix_i128_scale(7, 2, -1, None).is_err());
+        assert_eq!(fix_i128_scale(7, 2, 2, None).unwrap(), 7);
+    }
 }
