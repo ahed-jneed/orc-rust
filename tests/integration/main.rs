@@ -140,8 +140,6 @@ fn test_date_1900_not_null() {
 }
 
 #[test]
-#[ignore]
-// TODO: pending https://github.com/chronotope/chrono-tz/issues/155
 fn test_date_2038() {
     test_expected_file("TestOrcFile.testDate2038");
 }
