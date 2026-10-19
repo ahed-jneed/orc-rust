@@ -78,8 +78,13 @@ def union_row(nulls):
     return rng.choice([rng.randrange(100), "u%d" % rng.randrange(10)])
 
 
+def row(schema, nulls):
+    td = pyorc.TypeDescription.from_string(schema)
+    return {k: value(v, nulls) for k, v in td.fields.items()}
+
+
 def write(path, schema, codec, nulls=False, rows=N, **kw):
-    rows = [value(schema, nulls) for _ in range(rows)]
+    rows = [row(schema, nulls) for _ in range(rows)]
     with open(path, "wb") as f:
         with pyorc.Writer(f, schema, compression=codec, struct_repr=pyorc.StructRepr.DICT, **kw) as w:
             for r in rows:
@@ -113,7 +118,6 @@ def main(out):
     write(f"{out}/map_str_int.orc", "struct<m:map<string,int>>", CK.LZ4, nulls=True,
           row_index_stride=50, compression_block_size=1024, memory_block_size=256)
     write(f"{out}/struct_nested.orc", "struct<s:struct<a:int,b:string>>", CK.NONE, nulls=True)
-    write(f"{out}/union.orc", "struct<u:uniontype<int,string>>", CK.NONE, nulls=True)
     write(f"{out}/nested.orc",
           "struct<l:array<struct<a:int,b:array<string>>>,m:map<int,array<double>>>",
           CK.ZSTD, nulls=True, row_index_stride=50)

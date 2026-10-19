@@ -389,6 +389,12 @@ type Signatures = BTreeMap<String, (usize, usize, String)>;
 
 fn driver(seed_dir: &Path, out_dir: &Path, rng_seed: u64, count: usize) {
     std::fs::create_dir_all(out_dir).unwrap();
+    for seed in seed_files(seed_dir) {
+        let data = std::fs::read(&seed).unwrap();
+        if let Err(e) = read_all(&data, 8192, None) {
+            panic!("seed {} does not decode: {e}", seed.display());
+        }
+    }
     let exe = std::env::current_exe().unwrap();
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut signatures = Signatures::new();
