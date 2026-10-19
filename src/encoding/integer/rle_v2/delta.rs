@@ -79,7 +79,9 @@ pub fn read_delta_values<N: NInt, R: Read, S: EncodingSign>(
     } else {
         |acc, delta| acc.sub_i64(delta)
     };
-    let delta_base = delta_base.abs(); // TODO: i64::MIN?
+    let delta_base = delta_base.checked_abs().context(OutOfSpecSnafu {
+        msg: "delta base of delta integer encoding cannot be i64::MIN",
+    })?;
 
     if delta_bit_width == 0 {
         // If width is 0 then all values have fixed delta of delta_base
@@ -99,7 +101,9 @@ pub fn read_delta_values<N: NInt, R: Read, S: EncodingSign>(
         })?;
         out_ints.push(second_value);
         // Run length includes base value and first delta, so skip them
-        let length = length - 2;
+        let length = length.checked_sub(2).context(OutOfSpecSnafu {
+            msg: "delta run with varying deltas must have a length of at least 2",
+        })?;
 
         // Unpack the delta values
         read_ints(deltas, length, delta_bit_width, reader)?;

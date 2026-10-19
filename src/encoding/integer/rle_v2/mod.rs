@@ -937,7 +937,7 @@ mod tests {
     }
 
     fn patched_base_stream(encoded_width: u8, data: &[u8]) -> Vec<u8> {
-        let mut stream = vec![0b_1000_0000 | (encoded_width << 1), 0, 0, 0, 0];
+        let mut stream = vec![0b_1000_0000 | (encoded_width << 1), 0, 0, 1, 0];
         stream.extend_from_slice(data);
         stream.push(0);
         stream
@@ -951,7 +951,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Iqleb #3478: panics instead of returning an error"]
     fn test_patched_base_width_exceeds_i16() {
         // 24 and 32 bit widths are byte aligned, 26 is not
         for (encoded_width, bytes) in [(23, 3), (24, 4), (27, 4), (31, 8)] {
@@ -961,7 +960,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Iqleb #3478: panics instead of returning an error"]
     fn test_patched_base_width_exceeds_i32() {
         for (encoded_width, bytes) in [(28, 5), (30, 7), (31, 8)] {
             let stream = patched_base_stream(encoded_width, &vec![0; bytes]);
@@ -983,14 +981,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Iqleb #3478: panics instead of returning an error"]
     fn test_delta_single_value_with_delta_width() {
         let stream = [0b_1100_0010, 0, 0, 0];
         assert!(decode_all::<i64>(&stream, 1).is_err());
     }
 
     #[test]
-    #[ignore = "Iqleb #3478: panics instead of returning an error"]
     fn test_delta_base_i64_min() {
         let mut stream = vec![0b_1100_0000, 1, 0];
         stream.extend([0xFF; 9]);
