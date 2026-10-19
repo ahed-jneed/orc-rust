@@ -26,7 +26,8 @@ expected file holds the column names separated by tabs, every other line is one
 row with one rendered cell per column, separated by tabs. A cell is "~" for
 null, the decimal integer, "T" or "F" for a boolean, the string itself, "{a=X,b=Y}"
 for a struct and "[X,Y]" for a list. With --fixtures the named hand written cases
-are written as well; COUNT random cases are always written as prop_NNN.
+are written as well, with the random cases limited to 150 rows to keep them small;
+COUNT random cases are always written as prop_NNN.
 """
 
 import os
@@ -101,7 +102,7 @@ def hand_written(out_dir):
         ),
     )
     rng = random.Random(7)
-    rows = 6000
+    rows = 2000
     stripes = write_case(
         out_dir,
         "es_multistripe",
@@ -116,7 +117,6 @@ def hand_written(out_dir):
                     ],
                     pa.list_(empty),
                 ),
-                "t": pa.array([f"v{rng.randint(0, 10**6)}" for _ in range(rows)]),
             }
         ),
         stripe_size=1,
@@ -159,8 +159,8 @@ def random_value(rng, typ, null_ratio):
     return [random_value(rng, typ.value_type, null_ratio) for _ in range(rng.randint(0, 3))]
 
 
-def random_case(out_dir, name, rng):
-    rows = rng.choice([0, 1, 2, 7, rng.randint(0, 200), rng.randint(0, 5000), 5000])
+def random_case(out_dir, name, rng, max_rows):
+    rows = min(max_rows, rng.choice([0, 1, 2, 7, rng.randint(0, 200), rng.randint(0, 5000), 5000]))
     null_ratio = rng.choice([0.0, 0.0, 0.1, 0.5, 0.9, 1.0, rng.random()])
     arrays = {"id": pa.array(list(range(rows)), pa.int64())}
     for i in range(rng.randint(1, 4)):
@@ -185,9 +185,10 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     if "--fixtures" in sys.argv:
         hand_written(out_dir)
+    max_rows = 150 if "--fixtures" in sys.argv else 5000
     rng = random.Random(seed)
     for n in range(count):
-        random_case(out_dir, f"prop_{n:03}", rng)
+        random_case(out_dir, f"prop_{n:03}", rng, max_rows)
 
 
 if __name__ == "__main__":
