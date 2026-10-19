@@ -18,7 +18,10 @@
 use std::sync::Arc;
 
 use crate::encoding::integer::RleVersion;
-use crate::proto::{column_encoding::Kind as ProtoColumnKind, ColumnEncoding, StripeFooter};
+use crate::proto::{
+    column_encoding::Kind as ProtoColumnKind, stream::Kind as ProtoStreamKind, ColumnEncoding,
+    StripeFooter,
+};
 use crate::schema::DataType;
 
 #[derive(Clone, Debug)]
@@ -47,6 +50,18 @@ impl Column {
     pub fn encoding(&self) -> ColumnEncoding {
         let column = self.data_type.column_index();
         self.footer.columns[column].clone()
+    }
+
+    /// The kinds of all streams the stripe footer lists for this column, in footer order.
+    /// A kind this reader does not know is reported as `None`.
+    pub fn stream_kinds(&self) -> Vec<Option<ProtoStreamKind>> {
+        let column = self.column_id();
+        self.footer
+            .streams
+            .iter()
+            .filter(|stream| stream.column() == column)
+            .map(|stream| ProtoStreamKind::try_from(stream.kind.unwrap_or_default()).ok())
+            .collect()
     }
 
     pub fn rle_version(&self) -> RleVersion {
@@ -129,5 +144,46 @@ impl Column {
                     .collect()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::Stream;
+
+    #[test]
+    fn stream_kinds_of_the_column_only() {
+        let stream = |column: u32, kind: Option<i32>| Stream {
+            kind,
+            column: Some(column),
+            length: Some(0),
+        };
+        let footer = StripeFooter {
+            streams: vec![
+                stream(1, Some(ProtoStreamKind::Data as i32)),
+                stream(2, Some(ProtoStreamKind::Secondary as i32)),
+                stream(1, None),
+                stream(1, Some(1000)),
+                stream(1, Some(ProtoStreamKind::RowIndex as i32)),
+            ],
+            ..Default::default()
+        };
+        let data_type = DataType::Decimal {
+            column_index: 1,
+            precision: 10,
+            scale: 2,
+            scale_unspecified: false,
+        };
+        let column = Column::new("d".to_string(), data_type, Arc::new(footer));
+        assert_eq!(
+            column.stream_kinds(),
+            vec![
+                Some(ProtoStreamKind::Data),
+                Some(ProtoStreamKind::Present),
+                None,
+                Some(ProtoStreamKind::RowIndex)
+            ]
+        );
     }
 }

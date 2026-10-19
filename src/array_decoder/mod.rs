@@ -23,8 +23,7 @@ use arrow::datatypes::ArrowNativeTypeOp;
 use arrow::datatypes::ArrowPrimitiveType;
 use arrow::datatypes::DataType as ArrowDataType;
 use arrow::datatypes::{
-    Date32Type, Decimal128Type, DecimalType, Float32Type, Float64Type, Int16Type, Int32Type,
-    Int64Type, Int8Type, SchemaRef,
+    Date32Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, SchemaRef,
 };
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use snafu::{ensure, ResultExt};
@@ -36,8 +35,7 @@ use crate::encoding::float::FloatDecoder;
 use crate::encoding::integer::get_signed_int_decoder;
 use crate::encoding::PrimitiveValueDecoder;
 use crate::error::{
-    self, InvalidDecimalTypeSnafu, MismatchedSchemaSnafu, Result, UnexpectedSnafu,
-    UnsupportedTypeVariantSnafu,
+    self, MismatchedSchemaSnafu, Result, UnexpectedSnafu, UnsupportedTypeVariantSnafu,
 };
 use crate::proto::stream::Kind;
 use crate::schema::DataType;
@@ -491,16 +489,7 @@ pub fn array_decoder_factory(
             },
             ArrowDataType::Decimal128(a_precision, a_scale),
         ) if *precision as u8 == *a_precision && *scale as i8 == *a_scale => {
-            ensure!(
-                (1..=Decimal128Type::MAX_PRECISION as u32).contains(precision)
-                    && scale <= precision,
-                InvalidDecimalTypeSnafu {
-                    column: column.name().to_string(),
-                    precision: *precision,
-                    scale: *scale,
-                }
-            );
-            new_decimal_decoder(column, stripe, *precision, *scale, *scale_unspecified)
+            new_decimal_decoder(column, stripe, *precision, *scale, *scale_unspecified)?
         }
         (DataType::Timestamp { .. }, field_type) => {
             new_timestamp_decoder(column, field_type.clone(), stripe)?
