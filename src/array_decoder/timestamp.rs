@@ -34,14 +34,15 @@ use arrow::datatypes::{
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
 };
 use arrow::{array::ArrayRef, buffer::NullBuffer};
+use chrono::offset::Offset;
 use chrono::offset::TimeZone;
-use chrono::TimeDelta;
+use chrono::{DateTime, Datelike, NaiveDate};
 use chrono_tz::{Tz, UTC};
 
 use super::{
     decimal::DecimalArrayDecoder, ArrayBatchDecoder, PresentDecoder, PrimitiveArrayDecoder,
 };
-use crate::error::UnsupportedTypeVariantSnafu;
+use crate::error::{OutOfSpecSnafu, UnsupportedTypeVariantSnafu};
 
 const NANOSECONDS_IN_SECOND: i128 = 1_000_000_000;
 const NANOSECOND_DIGITS: i8 = 9;
@@ -49,6 +50,81 @@ const NANOSECOND_DIGITS: i8 = 9;
 /// Seconds from ORC epoch of 1 January 2015, which serves as the 0
 /// point for all timestamp values, to the UNIX epoch of 1 January 1970.
 const ORC_EPOCH_UTC_SECONDS_SINCE_UNIX_EPOCH: i64 = 1_420_070_400;
+
+const SECONDS_IN_DAY: i64 = 86_400;
+
+const END_OF_ZONE_RULES_SECONDS: i64 = 4_102_444_800;
+
+const JAVA_FIRST_TRANSITION_SECONDS: i64 = -2_208_988_800;
+
+const FOLD_FIRST_YEAR: i32 = 2072;
+const FOLD_LAST_YEAR: i32 = 2099;
+
+#[derive(Clone, Copy)]
+struct WriterZone {
+    tz: Tz,
+    repeats_yearly: bool,
+    java_standard_offset: Option<i64>,
+}
+
+impl WriterZone {
+    fn new(tz: Tz, java_writer: bool) -> Self {
+        let sample = |month| {
+            NaiveDate::from_ymd_opt(FOLD_LAST_YEAR, month, 15)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap()
+        };
+        let offset_in = |month| {
+            tz.offset_from_utc_datetime(&sample(month))
+                .fix()
+                .local_minus_utc()
+        };
+        let january = offset_in(1);
+        let repeats_yearly = (2..=12).any(|month| offset_in(month) != january);
+        let java_standard_offset =
+            java_writer.then(|| (1..=12).map(offset_in).min().map(i64::from).unwrap());
+        Self {
+            tz,
+            repeats_yearly,
+            java_standard_offset,
+        }
+    }
+
+    fn offset_seconds(&self, utc_seconds: i64) -> Option<i64> {
+        if let Some(standard_offset) = self.java_standard_offset {
+            if utc_seconds < JAVA_FIRST_TRANSITION_SECONDS {
+                return Some(standard_offset);
+            }
+        }
+        let utc_seconds = if self.repeats_yearly && utc_seconds >= END_OF_ZONE_RULES_SECONDS {
+            fold_into_rules(utc_seconds)?
+        } else {
+            utc_seconds
+        };
+        let dt = DateTime::from_timestamp(utc_seconds, 0)?;
+        let offset = self.tz.offset_from_utc_datetime(&dt.naive_utc());
+        Some(i64::from(offset.fix().local_minus_utc()))
+    }
+}
+
+fn fold_into_rules(utc_seconds: i64) -> Option<i64> {
+    let year = DateTime::from_timestamp(utc_seconds, 0)?.year();
+    let leap = NaiveDate::from_ymd_opt(year, 12, 31)?.ordinal() == 366;
+    let january_first = NaiveDate::from_ymd_opt(year, 1, 1)?;
+    let target = (FOLD_FIRST_YEAR..=FOLD_LAST_YEAR).find(|&candidate| {
+        let first = NaiveDate::from_ymd_opt(candidate, 1, 1).unwrap();
+        first.weekday() == january_first.weekday()
+            && (NaiveDate::from_ymd_opt(candidate, 12, 31)
+                .unwrap()
+                .ordinal()
+                == 366)
+                == leap
+    })?;
+    let target = NaiveDate::from_ymd_opt(target, 1, 1).unwrap();
+    let shift_days = i64::from(january_first.num_days_from_ce() - target.num_days_from_ce());
+    Some(utc_seconds - shift_days * SECONDS_IN_DAY)
+}
 
 fn get_inner_timestamp_decoder<T: ArrowTimestampType + Send>(
     column: &Column,
@@ -78,7 +154,10 @@ fn get_timestamp_decoder<T: ArrowTimestampType + Send>(
 ) -> Box<dyn ArrayBatchDecoder> {
     let inner = get_inner_timestamp_decoder::<T>(column, stripe, seconds_since_unix_epoch);
     match stripe.writer_tz() {
-        Some(writer_tz) => Box::new(TimestampOffsetArrayDecoder { inner, writer_tz }),
+        Some(writer_tz) => Box::new(TimestampOffsetArrayDecoder {
+            inner,
+            writer_zone: WriterZone::new(writer_tz, stripe.java_writer()),
+        }),
         None => Box::new(inner),
     }
 }
@@ -97,7 +176,7 @@ fn decimal128_decoder(
     column: &Column,
     stripe: &Stripe,
     seconds_since_unix_epoch: i64,
-    writer_tz: Option<Tz>,
+    writer_zone: Option<WriterZone>,
 ) -> DecimalArrayDecoder {
     let data = stripe.stream_map().get(column, Kind::Data);
     let data = get_signed_int_decoder(data, column.rle_version());
@@ -109,9 +188,9 @@ fn decimal128_decoder(
 
     let iter = TimestampNanosecondAsDecimalDecoder::new(seconds_since_unix_epoch, data, secondary);
 
-    let iter: Box<dyn PrimitiveValueDecoder<i128> + Send> = match writer_tz {
-        Some(UTC) | None => Box::new(iter),
-        Some(writer_tz) => Box::new(TimestampNanosecondAsDecimalWithTzDecoder(iter, writer_tz)),
+    let iter: Box<dyn PrimitiveValueDecoder<i128> + Send> = match writer_zone {
+        Some(WriterZone { tz: UTC, .. }) | None => Box::new(iter),
+        Some(writer_zone) => Box::new(TimestampNanosecondAsDecimalWithTzDecoder(iter, writer_zone)),
     };
 
     DecimalArrayDecoder::new(
@@ -180,7 +259,9 @@ pub fn new_timestamp_decoder(
                 column,
                 stripe,
                 seconds_since_unix_epoch,
-                stripe.writer_tz(),
+                stripe
+                    .writer_tz()
+                    .map(|tz| WriterZone::new(tz, stripe.java_writer())),
             )))
         }
         _ => MismatchedSchemaSnafu {
@@ -235,7 +316,7 @@ pub fn new_timestamp_instant_decoder(
 /// timezone of the writer to their UTC value.
 struct TimestampOffsetArrayDecoder<T: ArrowTimestampType> {
     inner: PrimitiveArrayDecoder<T>,
-    writer_tz: chrono_tz::Tz,
+    writer_zone: WriterZone,
 }
 
 impl<T: ArrowTimestampType> ArrayBatchDecoder for TimestampOffsetArrayDecoder<T> {
@@ -248,38 +329,24 @@ impl<T: ArrowTimestampType> ArrayBatchDecoder for TimestampOffsetArrayDecoder<T>
             .inner
             .next_primitive_batch(batch_size, parent_present)?;
 
-        let convert_timezone = |ts| {
+        let units_in_second = match T::UNIT {
+            TimeUnit::Second => 1,
+            TimeUnit::Millisecond => 1_000,
+            TimeUnit::Microsecond => 1_000_000,
+            TimeUnit::Nanosecond => 1_000_000_000,
+        };
+        let convert_timezone = |ts: i64| {
             // Convert from writer timezone to reader timezone (which we default to UTC)
-            // TODO: more efficient way of doing this?
-            let microseconds_in_timeunit = match T::UNIT {
-                TimeUnit::Second => 1_000_000,
-                TimeUnit::Millisecond => 1_000,
-                TimeUnit::Microsecond => 1,
-                TimeUnit::Nanosecond => -1, // not used in this case
-            };
-
-            match T::UNIT {
-                TimeUnit::Second | TimeUnit::Millisecond | TimeUnit::Microsecond => self
-                    .writer_tz
-                    .timestamp_micros(ts * microseconds_in_timeunit)
-                    .single()
-                    .map(|dt| {
-                        dt.naive_local().and_utc().timestamp_micros() / microseconds_in_timeunit
-                    }),
-                TimeUnit::Nanosecond => self
-                    .writer_tz
-                    .timestamp_nanos(ts)
-                    .naive_local()
-                    .and_utc()
-                    .timestamp_nanos_opt(),
-            }
+            let offset = self
+                .writer_zone
+                .offset_seconds(ts.div_euclid(units_in_second))?;
+            ts.checked_add(offset.checked_mul(units_in_second)?)
         };
         let array = array
             // first try to convert all non-nullable batches to non-nullable batches
             .try_unary::<_, T, _>(|ts| convert_timezone(ts).ok_or(()))
-            // in the rare case one of the values was out of the timeunit's range (eg. see
-            // <https://docs.rs/chrono/latest/chrono/struct.DateTime.html#method.timestamp_nanos_opt>),
-            // for nanoseconds), try again by allowing a nullable batch as output
+            // in the rare case one of the values was out of the timeunit's range,
+            // try again by allowing a nullable batch as output
             .unwrap_or_else(|()| array.unary_opt::<_, T>(convert_timezone));
         let array = Arc::new(array) as ArrayRef;
         Ok(array)
@@ -313,22 +380,19 @@ impl<T: ArrowTimestampType> ArrayBatchDecoder for TimestampInstantArrayDecoder<T
     }
 }
 
-struct TimestampNanosecondAsDecimalWithTzDecoder(TimestampNanosecondAsDecimalDecoder, Tz);
+struct TimestampNanosecondAsDecimalWithTzDecoder(TimestampNanosecondAsDecimalDecoder, WriterZone);
 
 impl TimestampNanosecondAsDecimalWithTzDecoder {
-    fn next_inner(&self, ts: i128) -> i128 {
-        let seconds = ts.div_euclid(NANOSECONDS_IN_SECOND);
-        let nanoseconds = ts.rem_euclid(NANOSECONDS_IN_SECOND);
-
-        // The addition may panic, because chrono stores dates in an i32,
-        // which can be overflowed with an i64 of seconds.
-        let dt = (self.1.timestamp_nanos(0)
-            + TimeDelta::new(seconds as i64, nanoseconds as u32)
-                .expect("TimeDelta duration out of bound"))
-        .naive_local()
-        .and_utc();
-
-        (dt.timestamp() as i128) * NANOSECONDS_IN_SECOND + (dt.timestamp_subsec_nanos() as i128)
+    fn next_inner(&self, ts: i128) -> Result<i128> {
+        let seconds = i64::try_from(ts.div_euclid(NANOSECONDS_IN_SECOND)).ok();
+        let offset = seconds.and_then(|seconds| self.1.offset_seconds(seconds));
+        match offset {
+            Some(offset) => Ok(ts + i128::from(offset) * NANOSECONDS_IN_SECOND),
+            None => OutOfSpecSnafu {
+                msg: "timestamp out of range for the writer timezone",
+            }
+            .fail(),
+        }
     }
 }
 
@@ -341,7 +405,7 @@ impl PrimitiveValueDecoder<i128> for TimestampNanosecondAsDecimalWithTzDecoder {
     fn decode(&mut self, out: &mut [i128]) -> Result<()> {
         self.0.decode(out)?;
         for x in out.iter_mut() {
-            *x = self.next_inner(*x);
+            *x = self.next_inner(*x)?;
         }
         Ok(())
     }

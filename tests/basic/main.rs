@@ -41,6 +41,7 @@ mod misc;
 mod rle_v1_wrapping;
 mod schema_snapshot;
 mod timestamp_secondary;
+mod timestamp_zones;
 mod type_tree;
 
 fn new_arrow_reader(path: &str, fields: &[&str]) -> ArrowReader<File> {
