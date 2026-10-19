@@ -37,10 +37,13 @@ pub trait ChunkReader {
 
     /// Read bytes from an offset with specific length.
     fn get_bytes(&self, offset_from_start: u64, length: u64) -> std::io::Result<Bytes> {
-        let mut bytes = vec![0; length as usize];
+        let mut bytes = Vec::new();
         self.get_read(offset_from_start)?
             .take(length)
-            .read_exact(&mut bytes)?;
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != length {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
         Ok(bytes.into())
     }
 }
@@ -71,7 +74,11 @@ impl ChunkReader for Bytes {
     }
 
     fn get_read(&self, offset_from_start: u64) -> std::io::Result<Self::T> {
-        Ok(self.slice(offset_from_start as usize..).reader())
+        let offset = usize::try_from(offset_from_start)
+            .ok()
+            .filter(|offset| *offset <= self.len())
+            .ok_or(std::io::ErrorKind::UnexpectedEof)?;
+        Ok(self.slice(offset..).reader())
     }
 }
 
@@ -107,8 +114,11 @@ mod async_chunk_reader {
         ) -> BoxFuture<'_, std::io::Result<Bytes>> {
             async move {
                 self.seek(SeekFrom::Start(offset_from_start)).await?;
-                let mut buffer = vec![0; length as usize];
-                self.read_exact(&mut buffer).await?;
+                let mut buffer = Vec::new();
+                (&mut *self).take(length).read_to_end(&mut buffer).await?;
+                if buffer.len() as u64 != length {
+                    return Err(std::io::ErrorKind::UnexpectedEof.into());
+                }
                 Ok(buffer.into())
             }
             .boxed()
@@ -211,7 +221,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "panics on an offset past the end of the input"]
     fn test_bytes_get_read_offset_past_end() {
         let bytes = Bytes::from_static(&[1, 2, 3]);
         assert!(bytes.get_read(4).is_err());
@@ -219,7 +228,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "allocates the requested length before reading"]
     fn test_get_bytes_length_beyond_input() {
         let bytes = Bytes::from_static(&[1, 2, 3]);
         assert!(bytes.get_bytes(1, u64::MAX / 2).is_err());
