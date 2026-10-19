@@ -39,6 +39,7 @@ mod empty_struct;
 mod misc;
 mod rle_v1_wrapping;
 mod timestamp_secondary;
+mod timestamp_zones;
 
 fn new_arrow_reader(path: &str, fields: &[&str]) -> ArrowReader<File> {
     let f = File::open(path).expect("no file found");
