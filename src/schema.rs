@@ -27,6 +27,9 @@ use crate::proto;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit, UnionMode};
 
+const UNSPECIFIED_DECIMAL_PRECISION: u32 = 38;
+const UNSPECIFIED_DECIMAL_SCALE: u32 = 6;
+
 /// Configuration for timestamp precision when converting ORC timestamps to Arrow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TimestampPrecision {
@@ -484,11 +487,18 @@ impl DataType {
                     variants,
                 }
             }
-            Kind::Decimal => Self::Decimal {
-                column_index,
-                precision: ty.precision(),
-                scale: ty.scale(),
-            },
+            Kind::Decimal => {
+                let (precision, scale) = match (ty.precision(), ty.scale()) {
+                    (0, 0) => (UNSPECIFIED_DECIMAL_PRECISION, UNSPECIFIED_DECIMAL_SCALE),
+                    (0, scale) => (UNSPECIFIED_DECIMAL_PRECISION, scale),
+                    recorded => recorded,
+                };
+                Self::Decimal {
+                    column_index,
+                    precision,
+                    scale,
+                }
+            }
             Kind::Date => Self::Date { column_index },
             Kind::Varchar => Self::Varchar {
                 column_index,

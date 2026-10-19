@@ -129,6 +129,20 @@ pub enum OrcError {
         arrow_type: ArrowDataType,
     },
 
+    #[snafu(display(
+        "Column '{}' has an invalid decimal type (precision {}, scale {})",
+        column,
+        precision,
+        scale,
+    ))]
+    InvalidDecimalType {
+        #[snafu(implicit)]
+        location: Location,
+        column: String,
+        precision: u32,
+        scale: u32,
+    },
+
     #[snafu(display("Failed to convert to record batch: {}", source))]
     ConvertRecordBatch {
         #[snafu(implicit)]
