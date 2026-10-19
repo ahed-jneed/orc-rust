@@ -78,8 +78,8 @@ def union_row(nulls):
     return rng.choice([rng.randrange(100), "u%d" % rng.randrange(10)])
 
 
-def write(path, schema, codec, nulls=False, **kw):
-    rows = [value(schema, nulls) for _ in range(N)]
+def write(path, schema, codec, nulls=False, rows=N, **kw):
+    rows = [value(schema, nulls) for _ in range(rows)]
     with open(path, "wb") as f:
         with pyorc.Writer(f, schema, compression=codec, struct_repr=pyorc.StructRepr.DICT, **kw) as w:
             for r in rows:
@@ -118,9 +118,23 @@ def main(out):
           "struct<l:array<struct<a:int,b:array<string>>>,m:map<int,array<double>>>",
           CK.ZSTD, nulls=True, row_index_stride=50)
     write(f"{out}/multi_stripe_zlib.orc", "struct<a:int,b:string>", CK.ZLIB, nulls=True,
-          stripe_size=2048, row_index_stride=50, compression_block_size=512, memory_block_size=256)
+          stripe_size=100, row_index_stride=50, compression_block_size=512, memory_block_size=256,
+          batch_size=25)
     write(f"{out}/multi_stripe_none.orc", "struct<a:bigint,b:string>",
-          CK.NONE, stripe_size=1024, row_index_stride=50, dict_key_size_threshold=0.0)
+          CK.NONE, stripe_size=1024, row_index_stride=50, dict_key_size_threshold=0.0,
+          batch_size=50)
+    write(f"{out}/multi_stripe_mixed_none.orc",
+          "struct<a:int,b:string,c:double,d:bigint,e:boolean,f:timestamp,g:decimal(12,3)>",
+          CK.NONE, nulls=True, stripe_size=100, row_index_stride=40, batch_size=25)
+    write(f"{out}/multi_stripe_nested_none.orc",
+          "struct<l:array<struct<a:int,b:array<string>>>,m:map<int,array<double>>>",
+          CK.NONE, nulls=True, stripe_size=100, row_index_stride=40, batch_size=25)
+    write(f"{out}/multi_stripe_dict_lz4.orc", "struct<s:string,t:varchar(5),d:date>", CK.LZ4,
+          nulls=True, stripe_size=100, row_index_stride=30, batch_size=25,
+          dict_key_size_threshold=1.0)
+    write(f"{out}/multi_stripe_bloom_none.orc", "struct<a:int,s:string>", CK.NONE, nulls=True,
+          stripe_size=1000, row_index_stride=25, batch_size=100, bloom_filter_columns=["a", "s"])
+    write(f"{out}/empty.orc", "struct<a:int,s:string>", CK.NONE, rows=0)
 
 
 if __name__ == "__main__":
