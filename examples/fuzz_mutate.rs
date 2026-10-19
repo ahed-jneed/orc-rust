@@ -134,6 +134,12 @@ fn regions(data: &[u8]) -> (Vec<Region>, Vec<usize>) {
         start: footer_start,
         end: ps_start,
     });
+    let metadata_len = varint_field(&data[ps_start..len - 1], 5).unwrap_or(0) as usize;
+    regions.push(Region {
+        name: "metadata",
+        start: footer_start - metadata_len,
+        end: footer_start,
+    });
     let mut reader = Bytes::copy_from_slice(data);
     let metadata = read_metadata(&mut reader).unwrap();
     let compressed = metadata.compression().is_some();
@@ -151,7 +157,11 @@ fn regions(data: &[u8]) -> (Vec<Region>, Vec<usize>) {
             end: index_end,
         });
         regions.push(Region {
-            name: "stripe_data",
+            name: if compressed {
+                "stripe_data_compressed"
+            } else {
+                "stripe_data_plain"
+            },
             start: index_end,
             end: data_end,
         });
@@ -168,12 +178,13 @@ fn regions(data: &[u8]) -> (Vec<Region>, Vec<usize>) {
     (regions, headers)
 }
 
-fn mutate(data: &[u8], rng: &mut Rng) -> (Vec<u8>, String) {
+fn mutate(data: &[u8], rng: &mut Rng) -> (Vec<u8>, String, &'static str) {
     let (regions, headers) = regions(data);
     let region = &regions[rng.below(regions.len())];
     let mut out = data.to_vec();
     let pick = |rng: &mut Rng| region.start + rng.below(region.end - region.start);
     let desc;
+    let mut class = region.name;
     match rng.below(7) {
         0 => {
             let n = 1 + rng.below(3);
@@ -238,10 +249,11 @@ fn mutate(data: &[u8], rng: &mut Rng) -> (Vec<u8>, String) {
                 out[p + 1] = (raw >> 8) as u8;
                 out[p + 2] = (raw >> 16) as u8;
                 desc = format!("chunk header at {} len={} original={}", p, len, orig);
+                class = "stream_header";
             }
         }
     }
-    (out, desc)
+    (out, desc, class)
 }
 
 static PANIC: Mutex<String> = Mutex::new(String::new());
@@ -339,16 +351,16 @@ fn worker(seed_dir: &Path, out_dir: &Path, rng_seed: u64, start: usize, count: u
     for i in start..start + count {
         let mut rng = Rng(rng_seed ^ (i as u64).wrapping_mul(0x2545_F491_4F6C_DD1D));
         let s = i % seeds.len();
-        let (mutant, desc) = mutate(&seed_data[s], &mut rng);
+        let (mutant, desc, class) = mutate(&seed_data[s], &mut rng);
         std::fs::write(out_dir.join("current.orc"), &mutant).unwrap();
         let name = seeds[s].file_name().unwrap().to_string_lossy().into_owned();
-        writeln!(stdout.lock(), "S {} {} | {}", i, name, desc).unwrap();
+        writeln!(stdout.lock(), "S {} {} | {} || {}", i, name, desc, class).unwrap();
         stdout.lock().flush().unwrap();
         let (status, detail) = run_reads(&seed_data[s], &mutant, &mut rng);
-        if status == "panic" {
+        if status == "panic" || status == "diff" {
             let _ = std::fs::copy(
                 out_dir.join("current.orc"),
-                out_dir.join(format!("panic_{rng_seed}_{i}.orc")),
+                out_dir.join(format!("{status}_{rng_seed}_{i}.orc")),
             );
         }
         writeln!(
@@ -377,9 +389,16 @@ type Signatures = BTreeMap<String, (usize, usize, String)>;
 
 fn driver(seed_dir: &Path, out_dir: &Path, rng_seed: u64, count: usize) {
     std::fs::create_dir_all(out_dir).unwrap();
+    for seed in seed_files(seed_dir) {
+        let data = std::fs::read(&seed).unwrap();
+        if let Err(e) = read_all(&data, 8192, None) {
+            panic!("seed {} does not decode: {e}", seed.display());
+        }
+    }
     let exe = std::env::current_exe().unwrap();
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut signatures = Signatures::new();
+    let mut by_class: BTreeMap<(String, String), usize> = BTreeMap::new();
     let mut next = 0;
     while next < count {
         let script = format!(
@@ -427,12 +446,24 @@ fn driver(seed_dir: &Path, out_dir: &Path, rng_seed: u64, count: usize) {
                         let status = parts.next().unwrap().to_string();
                         let detail = parts.next().unwrap_or("").to_string();
                         *counts.entry(status.clone()).or_default() += 1;
+                        let class = current
+                            .as_ref()
+                            .and_then(|c| c.1.rsplit_once(" || "))
+                            .map(|c| c.1.to_string())
+                            .unwrap_or_default();
+                        *by_class.entry((class, status.clone())).or_default() += 1;
                         if status == "panic" || status == "diff" {
                             let desc = current.as_ref().map(|c| c.1.clone()).unwrap_or_default();
                             let key = if status == "panic" {
                                 format!("panic: {detail}")
                             } else {
-                                format!("diff: {}", desc.split(" | ").nth(1).unwrap_or(""))
+                                format!(
+                                    "diff: {}",
+                                    desc.split(" | ")
+                                        .nth(1)
+                                        .and_then(|d| d.split(" || ").next())
+                                        .unwrap_or("")
+                                )
                             };
                             signatures.entry(key).or_insert((0, id, desc)).0 += 1;
                         }
@@ -487,6 +518,9 @@ fn driver(seed_dir: &Path, out_dir: &Path, rng_seed: u64, count: usize) {
     println!("rng_seed={rng_seed} mutants={count}");
     for (k, v) in &counts {
         println!("{k}: {v}");
+    }
+    for ((class, status), n) in &by_class {
+        println!("CLASS {class} {status}: {n}");
     }
     for (sig, (n, first, desc)) in &signatures {
         println!("SIG x{n} first={first} [{desc}] {sig}");

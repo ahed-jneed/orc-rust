@@ -40,6 +40,7 @@ mod empty_struct;
 mod misc;
 mod rle_v1_wrapping;
 mod schema_snapshot;
+mod stripe_consistency;
 mod timestamp_secondary;
 mod timestamp_zones;
 mod type_tree;

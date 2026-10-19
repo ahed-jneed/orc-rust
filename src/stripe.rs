@@ -15,7 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use prost::Message;
@@ -25,10 +28,14 @@ use crate::{
     column::Column,
     compression::{read_decompressed_section, Compression, Decompressor},
     error::{self, IoSnafu, Result},
-    proto::{self, stream::Kind, StripeFooter},
+    proto::{
+        self, column_encoding::Kind as EncodingKind, r#type::Kind as TypeKind, stream::Kind,
+        StripeFooter,
+    },
     reader::{metadata::FileMetadata, ChunkReader},
     schema::RootDataType,
     statistics::ColumnStatistics,
+    wire::STRIPE_FOOTER,
 };
 
 /// Stripe metadata parsed from the file tail metadata sections.
@@ -152,6 +159,7 @@ impl Stripe {
             footer,
             file_metadata.compression(),
         )?);
+        validate_stripe_footer(file_metadata.root_data_type(), &footer, info)?;
 
         let columns: Vec<Column> = projected_data_type
             .children()
@@ -229,6 +237,7 @@ impl Stripe {
             footer,
             file_metadata.compression(),
         )?);
+        validate_stripe_footer(file_metadata.root_data_type(), &footer, info)?;
 
         let columns: Vec<Column> = projected_data_type
             .children()
@@ -404,7 +413,151 @@ fn deserialize_stripe_footer(
     compression: Option<Compression>,
 ) -> Result<StripeFooter> {
     let buffer = read_decompressed_section(bytes, compression)?;
-    StripeFooter::decode(buffer.as_slice()).context(error::DecodeProtoSnafu)
+    let footer = StripeFooter::decode(buffer.as_slice()).context(error::DecodeProtoSnafu)?;
+    STRIPE_FOOTER.ensure_singular_fields_once(&buffer)?;
+    Ok(footer)
+}
+
+/// Refuses a stripe footer that contradicts the file's type tree or the stripe's own
+/// information: encodings that do not fit their column's type, streams of a kind their
+/// column's type cannot have, repeated streams, and stream lengths that do not add up to
+/// the stripe's index and data lengths.
+fn validate_stripe_footer(
+    schema: &RootDataType,
+    footer: &StripeFooter,
+    info: &StripeMetadata,
+) -> Result<()> {
+    ensure!(
+        footer.columns.len() == schema.column_count(),
+        error::OutOfSpecSnafu {
+            msg: format!(
+                "stripe footer has {} column encodings for {} columns",
+                footer.columns.len(),
+                schema.column_count()
+            )
+        }
+    );
+    for (column, encoding) in footer.columns.iter().enumerate() {
+        let kind = encoding
+            .kind
+            .and_then(|raw| EncodingKind::try_from(raw).ok())
+            .context(error::OutOfSpecSnafu {
+                msg: format!("column {column} has no known encoding kind"),
+            })?;
+        if matches!(kind, EncodingKind::Dictionary | EncodingKind::DictionaryV2) {
+            ensure!(
+                matches!(
+                    schema.column_kind(column),
+                    Some(TypeKind::String | TypeKind::Varchar | TypeKind::Char)
+                ),
+                error::OutOfSpecSnafu {
+                    msg: format!(
+                        "column {column} is not a string column but has {kind:?} encoding"
+                    )
+                }
+            );
+            let dictionary_size =
+                u64::from(encoding.dictionary_size.context(error::OutOfSpecSnafu {
+                    msg: format!("column {column} has no dictionary size"),
+                })?);
+            ensure!(
+                dictionary_size <= info.number_of_rows(),
+                error::OutOfSpecSnafu {
+                    msg: format!(
+                        "column {column} has a dictionary of {dictionary_size} entries for {} rows",
+                        info.number_of_rows()
+                    )
+                }
+            );
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut index_bytes = 0u64;
+    let mut data_bytes = 0u64;
+    for stream in &footer.streams {
+        let column = stream.column();
+        let type_kind = schema.column_kind(column as usize);
+        let kind = stream
+            .kind
+            .and_then(|raw| Kind::try_from(raw).ok())
+            .context(error::OutOfSpecSnafu {
+                msg: format!("column {column} has a stream of no known kind"),
+            })?;
+        ensure!(
+            type_kind.is_some_and(|type_kind| stream_kind_fits(type_kind, kind)),
+            error::OutOfSpecSnafu {
+                msg: format!("column {column} of type {type_kind:?} cannot have a {kind:?} stream")
+            }
+        );
+        if kind == Kind::DictionaryData {
+            ensure!(
+                footer.columns[column as usize].kind() == EncodingKind::Dictionary
+                    || footer.columns[column as usize].kind() == EncodingKind::DictionaryV2,
+                error::OutOfSpecSnafu {
+                    msg: format!(
+                        "column {column} has a DictionaryData stream but {:?} encoding",
+                        footer.columns[column as usize].kind()
+                    )
+                }
+            );
+        }
+        ensure!(
+            seen.insert((column, kind)),
+            error::OutOfSpecSnafu {
+                msg: format!("column {column} has more than one {kind:?} stream")
+            }
+        );
+        let bytes = if matches!(
+            kind,
+            Kind::RowIndex | Kind::BloomFilter | Kind::BloomFilterUtf8 | Kind::EncryptedIndex
+        ) {
+            &mut index_bytes
+        } else {
+            &mut data_bytes
+        };
+        *bytes = bytes
+            .checked_add(stream.length())
+            .context(error::OutOfSpecSnafu {
+                msg: "stripe stream lengths overflow",
+            })?;
+    }
+    ensure!(
+        index_bytes == info.index_length() && data_bytes == info.data_length(),
+        error::OutOfSpecSnafu {
+            msg: format!(
+                "stripe footer streams hold {index_bytes} index and {data_bytes} data bytes but the stripe has {} and {}",
+                info.index_length(),
+                info.data_length()
+            )
+        }
+    );
+    Ok(())
+}
+
+fn stream_kind_fits(type_kind: TypeKind, kind: Kind) -> bool {
+    match kind {
+        Kind::Present | Kind::RowIndex | Kind::BloomFilter | Kind::BloomFilterUtf8 => true,
+        Kind::Data => !matches!(type_kind, TypeKind::Struct | TypeKind::List | TypeKind::Map),
+        Kind::Length => matches!(
+            type_kind,
+            TypeKind::String
+                | TypeKind::Varchar
+                | TypeKind::Char
+                | TypeKind::Binary
+                | TypeKind::List
+                | TypeKind::Map
+        ),
+        Kind::DictionaryData | Kind::DictionaryCount => matches!(
+            type_kind,
+            TypeKind::String | TypeKind::Varchar | TypeKind::Char
+        ),
+        Kind::Secondary => matches!(
+            type_kind,
+            TypeKind::Decimal | TypeKind::Timestamp | TypeKind::TimestampInstant
+        ),
+        Kind::EncryptedIndex | Kind::EncryptedData => true,
+        Kind::StripeStatistics | Kind::FileStatistics => false,
+    }
 }
 
 fn validate_stream_layout(

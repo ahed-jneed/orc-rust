@@ -72,6 +72,7 @@ pub mod row_selection;
 pub mod schema;
 pub mod statistics;
 pub mod stripe;
+mod wire;
 mod writer;
 
 pub use arrow_reader::{ArrowReader, ArrowReaderBuilder};

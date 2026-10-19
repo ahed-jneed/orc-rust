@@ -246,12 +246,6 @@ fn test_empty_type_list_is_refused() {
 }
 
 #[test]
-fn test_unreferenced_types_are_still_read() {
-    let schema = open(vec![structure(&[1]), leaf(), leaf()]).unwrap();
-    assert_eq!(schema, "ROOT\n  c INTEGER");
-}
-
-#[test]
 fn test_nested_compound_types_are_read() {
     let types = vec![
         node(Kind::Struct, &[1, 3, 7], &["list", "map", "union"]),
@@ -274,19 +268,20 @@ fn test_nested_compound_types_are_read() {
 }
 
 #[test]
-fn test_types_that_nothing_refers_to_are_not_checked() {
+fn test_types_that_nothing_refers_to_are_refused() {
+    assert_refused(
+        vec![structure(&[1]), leaf(), leaf()],
+        "not referred to by any type",
+    );
     let mut orphan = structure(&[0]);
     orphan.field_names.clear();
-    let schema = open(vec![structure(&[1]), leaf(), orphan, structure(&[9])]).unwrap();
-    assert_eq!(schema, "ROOT\n  c INTEGER");
-}
-
-#[test]
-fn test_subtypes_of_scalar_types_are_ignored() {
-    let mut scalar = leaf();
-    scalar.subtypes = vec![0, 1, 99];
-    let schema = open(vec![structure(&[1]), scalar]).unwrap();
-    assert_eq!(schema, "ROOT\n  c INTEGER");
+    assert_refused(
+        vec![structure(&[1]), leaf(), orphan, structure(&[9])],
+        "not referred to by any type",
+    );
+    let mut root = structure(&[]);
+    root.field_names.clear();
+    assert_refused(vec![root, leaf()], "not referred to by any type");
 }
 
 #[test]
@@ -294,4 +289,66 @@ fn test_depth_limit_is_128_levels_below_the_root() {
     assert_eq!(MAX_TYPE_TREE_DEPTH, 128);
     assert!(open(chain(128)).is_ok());
     assert_refused(chain(129), "deeper");
+}
+
+const LEAF_KINDS: [Kind; 15] = [
+    Kind::Boolean,
+    Kind::Byte,
+    Kind::Short,
+    Kind::Int,
+    Kind::Long,
+    Kind::Float,
+    Kind::Double,
+    Kind::String,
+    Kind::Binary,
+    Kind::Timestamp,
+    Kind::Decimal,
+    Kind::Date,
+    Kind::Varchar,
+    Kind::Char,
+    Kind::TimestampInstant,
+];
+
+#[test]
+fn test_leaf_types_without_subtypes_are_read() {
+    for kind in LEAF_KINDS {
+        assert!(open(vec![structure(&[1]), node(kind, &[], &[])]).is_ok());
+    }
+}
+
+#[test]
+fn test_leaf_type_with_subtypes_is_refused() {
+    for kind in LEAF_KINDS {
+        assert_refused(
+            vec![structure(&[1]), node(kind, &[2], &[]), leaf()],
+            "cannot have subtypes or field names",
+        );
+        assert_refused(
+            vec![structure(&[1]), node(kind, &[2, 3], &[]), leaf(), leaf()],
+            "cannot have subtypes or field names",
+        );
+    }
+}
+
+#[test]
+fn test_leaf_type_with_field_names_is_refused() {
+    for kind in LEAF_KINDS {
+        assert_refused(
+            vec![structure(&[1]), node(kind, &[], &["x"])],
+            "cannot have subtypes or field names",
+        );
+    }
+}
+
+#[test]
+fn test_union_without_variants_is_refused() {
+    assert_refused(
+        vec![structure(&[1]), node(Kind::Union, &[], &[])],
+        "at least one variant",
+    );
+}
+
+#[test]
+fn test_union_with_one_variant_is_read() {
+    assert!(open(vec![structure(&[1]), node(Kind::Union, &[2], &[]), leaf()]).is_ok());
 }

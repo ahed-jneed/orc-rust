@@ -24,7 +24,9 @@
 use std::collections::HashMap;
 
 use crate::bloom_filter::BloomFilter;
-use crate::error::Result;
+use snafu::ensure;
+
+use crate::error::{OutOfSpecSnafu, Result};
 use crate::proto;
 use crate::statistics::ColumnStatistics;
 
@@ -244,6 +246,7 @@ pub fn parse_stripe_row_indexes(
     use snafu::ResultExt;
 
     let mut row_indexes = HashMap::new();
+    let expected_groups = total_rows.div_ceil(rows_per_group.max(1));
 
     for column in columns {
         let column_id = column.column_id();
@@ -261,6 +264,21 @@ pub fn parse_stripe_row_indexes(
                 proto::RowIndex::decode(buffer.as_slice()).context(DecodeProtoSnafu)?;
 
             // Parse into RowGroupIndex
+            ensure!(
+                rows_per_group > 0,
+                OutOfSpecSnafu {
+                    msg: "row index stream in a file whose row index stride is 0"
+                }
+            );
+            ensure!(
+                proto_row_index.entry.len() == expected_groups,
+                OutOfSpecSnafu {
+                    msg: format!(
+                        "row index of column {column_id} has {} entries for {total_rows} rows at a stride of {rows_per_group}",
+                        proto_row_index.entry.len()
+                    )
+                }
+            );
             let row_group_index =
                 parse_row_index(&proto_row_index, column_id as usize, rows_per_group)?;
             row_indexes.insert(column_id as usize, row_group_index);
@@ -272,13 +290,14 @@ pub fn parse_stripe_row_indexes(
     for (column_id, filters) in bloom_filters {
         if let Some(row_group_index) = row_indexes.get_mut(&column_id) {
             let entry_count = row_group_index.num_row_groups();
-            assert_eq!(
-                entry_count,
-                filters.len(),
-                "Bloom filter count mismatch: expected {} but got {} for column {}",
-                entry_count,
-                filters.len(),
-                column_id
+            ensure!(
+                entry_count == filters.len(),
+                OutOfSpecSnafu {
+                    msg: format!(
+                        "column {column_id} has {} bloom filters for {entry_count} row index entries",
+                        filters.len()
+                    )
+                }
             );
             for (entry, bloom) in row_group_index.entries_mut().zip(filters) {
                 entry.bloom_filter = Some(bloom);

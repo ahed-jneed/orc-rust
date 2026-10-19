@@ -38,8 +38,9 @@ const DEFAULT_COMPRESSION_BLOCK_SIZE: u64 = 256 * 1024;
 const MAX_DECOMPRESSED_BLOCK_SIZE: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_DECOMPRESSED_SECTION_SIZE: usize = 64 * 1024 * 1024;
 
-/// Bits 1..23 of the 3-byte header store the payload length.
-const MAX_COMPRESSION_BLOCK_SIZE: u64 = 1 << 23;
+/// Bits 1..23 of the 3-byte header store the payload length, so a compression block size
+/// of this value or larger cannot be written.
+pub(crate) const MAX_COMPRESSION_BLOCK_SIZE: u64 = 1 << 23;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Compression {

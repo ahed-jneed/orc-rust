@@ -82,62 +82,50 @@ fn test_decimal_layout_precision_19_in_decimal64_file_keeps_secondary_stream() {
 
 #[test]
 fn test_decimal_layout_refuses_secondary_kind_changed_to_data() {
-    assert_refused(
-        "legacy_secondary_as_data",
-        "more than one Some(Data) stream",
-    );
+    assert_refused("legacy_secondary_as_data", "more than one Data stream");
 }
 
 #[test]
 fn test_decimal_layout_refuses_extra_secondary_stream() {
-    assert_refused(
-        "legacy_extra_secondary",
-        "more than one Some(Secondary) stream",
-    );
+    assert_refused("legacy_extra_secondary", "more than one Secondary stream");
 }
 
 #[test]
 fn test_decimal_layout_refuses_extra_data_stream() {
-    assert_refused("legacy_extra_data", "more than one Some(Data) stream");
+    assert_refused("legacy_extra_data", "more than one Data stream");
 }
 
 #[test]
 fn test_decimal_layout_refuses_triple_data_stream() {
-    assert_refused("legacy_triple_data", "more than one Some(Data) stream");
+    assert_refused("legacy_triple_data", "more than one Data stream");
 }
 
 #[test]
 fn test_decimal_layout_refuses_unexpected_stream_kind() {
-    assert_refused("legacy_extra_length", "unexpected Some(Length) stream");
+    assert_refused("legacy_extra_length", "cannot have a Length stream");
 }
 
 #[test]
 fn test_decimal_layout_refuses_data_kind_changed_to_secondary() {
-    assert_refused(
-        "legacy_data_as_secondary",
-        "more than one Some(Secondary) stream",
-    );
+    assert_refused("legacy_data_as_secondary", "more than one Secondary stream");
 }
 
 #[test]
 fn test_decimal_layout_refuses_secondary_stream_missing() {
     assert_refused(
         "legacy_secondary_as_bloom_filter",
-        "needs both a DATA and a SECONDARY",
+        "stripe footer streams hold",
     );
 }
 
 #[test]
 fn test_decimal_layout_refuses_data_stream_missing() {
-    assert_refused(
-        "legacy_data_as_bloom_filter",
-        "needs both a DATA and a SECONDARY",
-    );
+    assert_refused("legacy_data_as_bloom_filter", "stripe footer streams hold");
 }
 
 #[test]
 fn test_decimal_layout_refuses_secondary_kind_changed_to_length() {
-    assert_refused("legacy_secondary_missing", "unexpected Some(Length) stream");
+    assert_refused("legacy_secondary_missing", "cannot have a Length stream");
 }
 
 #[test]
@@ -227,20 +215,17 @@ fn test_decimal_layout_refuses_unspecified_precision_scale_128() {
 
 #[test]
 fn test_decimal_layout_refuses_decimal64_extra_secondary_stream() {
-    assert_refused(
-        "d64_extra_secondary",
-        "SECONDARY stream in a Decimal64 file",
-    );
+    assert_refused("d64_extra_secondary", "stripe footer streams hold");
 }
 
 #[test]
 fn test_decimal_layout_refuses_decimal64_duplicate_data_stream() {
-    assert_refused("d64_extra_data", "more than one Some(Data) stream");
+    assert_refused("d64_extra_data", "more than one Data stream");
 }
 
 #[test]
 fn test_decimal_layout_refuses_decimal64_unexpected_stream_kind() {
-    assert_refused("d64_extra_length", "unexpected Some(Length) stream");
+    assert_refused("d64_extra_length", "cannot have a Length stream");
 }
 
 #[test]
@@ -253,12 +238,15 @@ fn test_decimal_layout_refuses_decimal64_data_kind_changed_to_secondary() {
 
 #[test]
 fn test_decimal_layout_refuses_decimal64_data_kind_changed_to_length() {
-    assert_refused("d64_data_as_length", "unexpected Some(Length) stream");
+    assert_refused("d64_data_as_length", "cannot have a Length stream");
 }
 
 #[test]
 fn test_decimal_layout_refuses_decimal64_dictionary_encoding() {
-    assert_refused("d64_dictionary_encoding", "has encoding DictionaryV2");
+    assert_refused(
+        "d64_dictionary_encoding",
+        "is not a string column but has DictionaryV2 encoding",
+    );
 }
 
 #[test]
@@ -268,7 +256,7 @@ fn test_decimal_layout_refuses_decimal64_streams_in_legacy_version_file() {
 
 #[test]
 fn test_decimal_layout_refuses_decimal64_file_wide_column_duplicate_data_stream() {
-    assert_refused("d64_wide_extra_data", "more than one Some(Data) stream");
+    assert_refused("d64_wide_extra_data", "more than one Data stream");
 }
 
 #[test]
@@ -318,8 +306,5 @@ async fn test_decimal_layout_async_refuses_damaged_decimal64_file() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(
-        error.contains("SECONDARY stream in a Decimal64 file"),
-        "{error}"
-    );
+    assert!(error.contains("stripe footer streams hold"), "{error}");
 }

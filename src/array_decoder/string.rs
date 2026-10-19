@@ -30,7 +30,7 @@ use crate::column::Column;
 use crate::compression::Decompressor;
 use crate::encoding::integer::get_unsigned_int_decoder;
 use crate::encoding::PrimitiveValueDecoder;
-use crate::error::{ArrowSnafu, IoSnafu, OffsetOverflowSnafu, Result};
+use crate::error::{ArrowSnafu, IoSnafu, OffsetOverflowSnafu, OutOfSpecSnafu, Result};
 use crate::proto::column_encoding::Kind as ColumnEncodingKind;
 use crate::proto::stream::Kind;
 use crate::stripe::Stripe;
@@ -70,8 +70,9 @@ pub fn new_string_decoder(column: &Column, stripe: &Stripe) -> Result<Box<dyn Ar
             // TODO: is this always guaranteed to be set for all dictionaries?
             let dictionary_size = column.dictionary_size();
             // We assume here we have fetched all the dictionary strings (according to size above)
-            let dictionary_strings = DirectStringArrayDecoder::new(bytes, lengths, None)
-                .next_byte_batch(dictionary_size, None)?;
+            let mut dictionary = DirectStringArrayDecoder::new(bytes, lengths, None);
+            let dictionary_strings = dictionary.next_byte_batch(dictionary_size, None)?;
+            dictionary.ensure_exhausted()?;
             let dictionary_strings = Arc::new(dictionary_strings);
 
             let indexes = stripe.stream_map().get(column, Kind::Data);
@@ -109,6 +110,24 @@ impl<T: ByteArrayType> GenericByteArrayDecoder<T> {
             present,
             phantom: Default::default(),
         }
+    }
+
+    /// Refuses a decoder whose length or data stream still holds entries after the
+    /// expected ones were read.
+    fn ensure_exhausted(&mut self) -> Result<()> {
+        ensure!(
+            self.lengths.decode(&mut [0]).is_err(),
+            OutOfSpecSnafu {
+                msg: "dictionary length stream holds more entries than the dictionary size"
+            }
+        );
+        ensure!(
+            self.bytes.read(&mut [0]).context(IoSnafu)? == 0,
+            OutOfSpecSnafu {
+                msg: "dictionary data stream holds bytes beyond its lengths"
+            }
+        );
+        Ok(())
     }
 
     fn next_byte_batch(

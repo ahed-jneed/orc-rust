@@ -60,7 +60,7 @@ tests/basic/data/empty_struct/prop_010.orc	f2cb4dae4a7b009a
 tests/basic/data/empty_struct/prop_011.orc	5c4eb79266482b09
 tests/basic/data/f32_long_long_gzip.orc	d313be07cf494ba4
 tests/basic/data/fuzz_decimal_scale_difference.orc	ecaefb1f14a406f7
-tests/basic/data/fuzz_footer_missing_encodings.orc	ecaefb1f14a406f7
+tests/basic/data/fuzz_footer_missing_encodings.orc	error
 tests/basic/data/long_bool.orc	9548a588a11eef10
 tests/basic/data/long_bool_gzip.orc	9548a588a11eef10
 tests/basic/data/nested_array.orc	9f2ed384709cb15f
