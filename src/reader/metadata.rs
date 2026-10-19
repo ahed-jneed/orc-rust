@@ -335,3 +335,79 @@ fn deserialize_footer_metadata(bytes: Bytes, compression: Option<Compression>) -
         .context(error::IoSnafu)?;
     Metadata::decode(buffer.as_slice()).context(error::DecodeProtoSnafu)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::proto::r#type::Kind;
+
+    use super::*;
+
+    /// Assembles an uncompressed file tail (without any stripes) around the given types.
+    fn file_with_types(types: Vec<proto::Type>) -> Bytes {
+        let footer = Footer {
+            types,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let postscript = PostScript {
+            footer_length: Some(footer.len() as u64),
+            metadata_length: Some(0),
+            compression: Some(proto::CompressionKind::None as i32),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let mut file = footer;
+        file.extend_from_slice(&postscript);
+        file.push(postscript.len() as u8);
+        file.into()
+    }
+
+    #[test]
+    fn test_type_tree_with_cycle_is_an_error() {
+        // The root struct lists itself as its own child. Reading this used to recurse
+        // until the stack overflowed, aborting the whole process.
+        let mut file = file_with_types(vec![proto::Type {
+            kind: Some(Kind::Struct as i32),
+            subtypes: vec![0],
+            field_names: vec!["a".to_string()],
+            ..Default::default()
+        }]);
+        let err = read_metadata(&mut file).unwrap_err();
+        assert!(
+            err.to_string().contains("referenced more than once"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_non_struct_root_is_an_error() {
+        // Used to panic on an assertion
+        let mut file = file_with_types(vec![proto::Type {
+            kind: Some(Kind::Int as i32),
+            ..Default::default()
+        }]);
+        let err = read_metadata(&mut file).unwrap_err();
+        assert!(
+            err.to_string().contains("root type must be a struct"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_valid_type_tree() {
+        let mut file = file_with_types(vec![
+            proto::Type {
+                kind: Some(Kind::Struct as i32),
+                subtypes: vec![1],
+                field_names: vec!["a".to_string()],
+                ..Default::default()
+            },
+            proto::Type {
+                kind: Some(Kind::Int as i32),
+                ..Default::default()
+            },
+        ]);
+        let metadata = read_metadata(&mut file).unwrap();
+        assert_eq!(metadata.root_data_type().children().len(), 1);
+    }
+}
