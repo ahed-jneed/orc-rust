@@ -81,6 +81,18 @@ fn signed_run(values: &[i64]) -> Vec<u8> {
 
 type RawEdit = fn(Vec<u8>) -> Vec<u8>;
 
+type Append = (Option<(u64, usize)>, Vec<u8>);
+
+fn apply_appends(mut bytes: Vec<u8>, appends: &[Append]) -> Vec<u8> {
+    for (target, extra) in appends {
+        bytes = match target {
+            Some((number, occurrence)) => append_to_field(&bytes, *number, *occurrence, extra),
+            None => [bytes, extra.clone()].concat(),
+        };
+    }
+    bytes
+}
+
 struct StripeSpec {
     rows: u64,
     index: u64,
@@ -88,6 +100,7 @@ struct StripeSpec {
     body: Vec<u8>,
     footer: StripeFooter,
     footer_edit: Option<RawEdit>,
+    footer_appends: Vec<Append>,
 }
 
 fn encoding(kind: EncodingKind, dictionary_size: Option<u32>) -> ColumnEncoding {
@@ -115,6 +128,7 @@ fn stripe(rows: u64, streams: &[(u32, Kind, Vec<u8>)], encodings: &[ColumnEncodi
             ..Default::default()
         },
         footer_edit: None,
+        footer_appends: vec![],
     };
     for (column, kind, bytes) in streams {
         if is_index(*kind) {
@@ -163,6 +177,8 @@ struct OrcFile {
     stripe_statistics: Vec<StripeStatistics>,
     footer_edit: Option<RawEdit>,
     postscript_edit: Option<RawEdit>,
+    footer_appends: Vec<Append>,
+    postscript_append: Vec<u8>,
 }
 
 impl OrcFile {
@@ -178,6 +194,8 @@ impl OrcFile {
             stripe_statistics: vec![],
             footer_edit: None,
             postscript_edit: None,
+            footer_appends: vec![],
+            postscript_append: vec![],
         }
     }
 
@@ -212,6 +230,7 @@ impl OrcFile {
             if let Some(edit) = spec.footer_edit {
                 stripe_footer = edit(stripe_footer);
             }
+            stripe_footer = apply_appends(stripe_footer, &spec.footer_appends);
             let stripe_footer = self.section(stripe_footer);
             file.extend_from_slice(&stripe_footer);
             footer.stripes.push(StripeInformation {
@@ -246,6 +265,7 @@ impl OrcFile {
         if let Some(edit) = self.footer_edit {
             footer_bytes = edit(footer_bytes);
         }
+        footer_bytes = apply_appends(footer_bytes, &self.footer_appends);
         let footer = self.section(footer_bytes);
         postscript.footer_length = postscript.footer_length.or(Some(footer.len() as u64));
         file.extend_from_slice(&footer);
@@ -253,6 +273,7 @@ impl OrcFile {
         if let Some(edit) = self.postscript_edit {
             postscript = edit(postscript);
         }
+        postscript.extend_from_slice(&self.postscript_append);
         file.extend_from_slice(&postscript);
         file.push(postscript.len() as u8);
         Bytes::from(file)
@@ -1332,4 +1353,321 @@ fn test_short_and_int_statistics_beyond_the_column_type_are_refused() {
     );
     let error = read(file(TypeKind::Int, i64::from(i32::MIN) - 1, 0), 8192).unwrap_err();
     assert!(error.contains("type Int has statistics outside"), "{error}");
+}
+
+#[test]
+fn test_dictionary_with_one_entry_per_row_reads() {
+    let file = OrcFile::new(vec![dictionary_stripe(
+        5,
+        &[1, 1, 1, 1, 1],
+        b"vwxyz",
+        &[4, 3, 2, 1, 0],
+    )]);
+    assert_eq!(
+        dictionary_values(file.render()).unwrap(),
+        ["z", "y", "x", "w", "v"]
+    );
+}
+
+#[test]
+fn test_dictionary_encoding_on_varchar_and_char_columns_reads() {
+    for kind in [TypeKind::Varchar, TypeKind::Char] {
+        let mut file = OrcFile::new(vec![dictionary_stripe(
+            2,
+            &[1, 2],
+            b"xyz",
+            &[0, 1, 1, 0, 1],
+        )]);
+        file.types[2].kind = Some(kind as i32);
+        assert_eq!(
+            dictionary_values(file.render()).unwrap(),
+            ["x", "yz", "yz", "x", "yz"],
+            "{kind:?}"
+        );
+    }
+}
+
+fn all_type_kinds() -> Vec<TypeKind> {
+    vec![
+        TypeKind::Boolean,
+        TypeKind::Byte,
+        TypeKind::Short,
+        TypeKind::Int,
+        TypeKind::Long,
+        TypeKind::Float,
+        TypeKind::Double,
+        TypeKind::String,
+        TypeKind::Binary,
+        TypeKind::Timestamp,
+        TypeKind::TimestampInstant,
+        TypeKind::Decimal,
+        TypeKind::Date,
+        TypeKind::Varchar,
+        TypeKind::Char,
+        TypeKind::Struct,
+        TypeKind::List,
+        TypeKind::Map,
+        TypeKind::Union,
+    ]
+}
+
+fn tree_with(kind: TypeKind) -> Vec<Type> {
+    let leaf = || node(TypeKind::Int, &[], &[]);
+    match kind {
+        TypeKind::Struct => vec![
+            node(TypeKind::Struct, &[1], &["c"]),
+            node(kind, &[2], &["x"]),
+            leaf(),
+        ],
+        TypeKind::List => vec![
+            node(TypeKind::Struct, &[1], &["c"]),
+            node(kind, &[2], &[]),
+            leaf(),
+        ],
+        TypeKind::Map => vec![
+            node(TypeKind::Struct, &[1], &["c"]),
+            node(kind, &[2, 3], &[]),
+            leaf(),
+            leaf(),
+        ],
+        TypeKind::Union => vec![
+            node(TypeKind::Struct, &[1], &["c"]),
+            node(kind, &[2], &[]),
+            leaf(),
+        ],
+        _ => vec![node(TypeKind::Struct, &[1], &["c"]), node(kind, &[], &[])],
+    }
+}
+
+fn stripe_validates(file: &OrcFile) -> Result<(), String> {
+    let bytes = file.render();
+    let builder = ArrowReaderBuilder::try_new(bytes.clone()).map_err(|error| error.to_string())?;
+    let metadata = builder.file_metadata();
+    let mut reader = bytes;
+    Stripe::new(
+        &mut reader,
+        metadata,
+        metadata.root_data_type(),
+        &metadata.stripe_metadatas()[0],
+    )
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+fn single_stream_file(kind: TypeKind, stream_kind: Kind) -> OrcFile {
+    let types = tree_with(kind);
+    let columns = types.len();
+    let mut file = OrcFile::new(vec![stripe(
+        0,
+        &[(1, stream_kind, vec![0; 3])],
+        &direct(columns),
+    )]);
+    file.types = types;
+    file
+}
+
+fn stream_kind_fits(kind: TypeKind, stream_kind: Kind) -> bool {
+    use TypeKind::*;
+    match stream_kind {
+        Kind::Present
+        | Kind::RowIndex
+        | Kind::BloomFilter
+        | Kind::BloomFilterUtf8
+        | Kind::EncryptedIndex
+        | Kind::EncryptedData => true,
+        Kind::Data => !matches!(kind, Struct | List | Map),
+        Kind::Length => matches!(kind, String | Varchar | Char | Binary | List | Map),
+        Kind::DictionaryData | Kind::DictionaryCount => matches!(kind, String | Varchar | Char),
+        Kind::Secondary => matches!(kind, Decimal | Timestamp | TimestampInstant),
+        Kind::StripeStatistics | Kind::FileStatistics => false,
+    }
+}
+
+#[test]
+fn test_stream_kinds_a_column_type_can_have() {
+    let stream_kinds = [
+        Kind::Present,
+        Kind::Data,
+        Kind::Length,
+        Kind::DictionaryData,
+        Kind::DictionaryCount,
+        Kind::Secondary,
+        Kind::RowIndex,
+        Kind::BloomFilter,
+        Kind::BloomFilterUtf8,
+        Kind::EncryptedIndex,
+        Kind::EncryptedData,
+        Kind::StripeStatistics,
+        Kind::FileStatistics,
+    ];
+    for kind in all_type_kinds() {
+        for stream_kind in stream_kinds {
+            let dictionary_data = stream_kind == Kind::DictionaryData;
+            let mut file = single_stream_file(kind, stream_kind);
+            if dictionary_data {
+                file.stripes[0].footer.columns[1] = encoding(EncodingKind::Dictionary, Some(0));
+            }
+            let result = stripe_validates(&file);
+            assert_eq!(
+                result.is_ok(),
+                stream_kind_fits(kind, stream_kind),
+                "{kind:?} {stream_kind:?}: {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_index_streams_count_toward_the_index_length() {
+    for stream_kind in [
+        Kind::RowIndex,
+        Kind::BloomFilter,
+        Kind::BloomFilterUtf8,
+        Kind::EncryptedIndex,
+    ] {
+        let mut file = single_stream_file(TypeKind::Int, stream_kind);
+        assert_eq!(stripe_validates(&file), Ok(()), "{stream_kind:?}");
+        file.stripes[0].index = 0;
+        file.stripes[0].data = 3;
+        assert!(stripe_validates(&file).is_err(), "{stream_kind:?}");
+    }
+    for stream_kind in [Kind::Present, Kind::Data, Kind::EncryptedData] {
+        let mut file = single_stream_file(TypeKind::Int, stream_kind);
+        assert_eq!(stripe_validates(&file), Ok(()), "{stream_kind:?}");
+        file.stripes[0].index = 3;
+        file.stripes[0].data = 0;
+        assert!(stripe_validates(&file).is_err(), "{stream_kind:?}");
+    }
+}
+
+#[test]
+fn test_encoding_kinds_a_column_type_can_have() {
+    let kinds = [
+        EncodingKind::Direct,
+        EncodingKind::Dictionary,
+        EncodingKind::DirectV2,
+        EncodingKind::DictionaryV2,
+    ];
+    for kind in all_type_kinds() {
+        for encoding_kind in kinds {
+            let mut file = single_stream_file(kind, Kind::Present);
+            file.stripes[0].footer.columns[1] = encoding(encoding_kind, Some(0));
+            let dictionary = matches!(
+                encoding_kind,
+                EncodingKind::Dictionary | EncodingKind::DictionaryV2
+            );
+            let string = matches!(kind, TypeKind::String | TypeKind::Varchar | TypeKind::Char);
+            let result = stripe_validates(&file);
+            assert_eq!(
+                result.is_ok(),
+                !dictionary || string,
+                "{kind:?} {encoding_kind:?}: {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_stream_of_a_utf8_bloom_filter_reads() {
+    let bloom_filter = BloomFilter {
+        num_hash_functions: Some(3),
+        bitset: vec![0; 2],
+        ..Default::default()
+    };
+    let bloom = BloomFilterIndex {
+        bloom_filter: vec![bloom_filter; 3],
+    }
+    .encode_to_vec();
+    let mut file = stride_file(Some(2), 3, 0);
+    file.stripes[0] = stripe(
+        5,
+        &[
+            (
+                1,
+                Kind::RowIndex,
+                file.stripes[0].body[..file.stripes[0].index as usize].to_vec(),
+            ),
+            (1, Kind::BloomFilterUtf8, bloom),
+            (1, Kind::Data, signed_run(&[0, 1, 2, 3, 4])),
+            (2, Kind::Length, literal_run(&[1; 5])),
+            (2, Kind::Data, b"abcde".to_vec()),
+        ],
+        &direct(3),
+    );
+    assert_eq!(row_indexes(&file), Ok(3));
+}
+
+#[test]
+fn test_bloom_filters_more_than_row_index_entries_are_refused() {
+    let error = row_indexes(&stride_file(Some(2), 3, 4)).unwrap_err();
+    assert!(
+        error.contains("4 bloom filters for 3 row index entries"),
+        "{error}"
+    );
+}
+
+#[test]
+fn test_every_singular_field_of_the_metadata_messages_is_checked() {
+    let twice = |number: u64, payload: Option<&[u8]>| {
+        let one = match payload {
+            Some(payload) => field_bytes(number, payload),
+            None => field_varint(number, 0),
+        };
+        [one.clone(), one].concat()
+    };
+    let rejects = |file: OrcFile, message: &str| {
+        let error = read(file.render(), 8192).unwrap_err();
+        assert!(
+            error.contains(&format!("{message} occurs more than once")),
+            "{message}: {error}"
+        );
+    };
+
+    for (number, payload) in [
+        (1, None),
+        (2, None),
+        (3, None),
+        (5, None),
+        (6, None),
+        (8000, Some(b"ORC".as_slice())),
+    ] {
+        let mut file = two_stripes();
+        file.postscript_append = twice(number, payload);
+        rejects(file, &format!("field {number} of the postscript"));
+    }
+    for (number, payload) in [
+        (1, None),
+        (2, None),
+        (6, None),
+        (8, None),
+        (9, None),
+        (10, Some(b"".as_slice())),
+        (11, None),
+        (12, Some(b"x".as_slice())),
+    ] {
+        let mut file = two_stripes();
+        file.footer_appends = vec![(None, twice(number, payload))];
+        rejects(file, &format!("field {number} of the footer"));
+    }
+    for number in 1..=6 {
+        let mut file = two_stripes();
+        file.footer_appends = vec![(Some((3, 0)), twice(number, None))];
+        rejects(file, &format!("field {number} of a stripe information"));
+    }
+    for number in [1, 4, 5, 6] {
+        let mut file = two_stripes();
+        file.footer_appends = vec![(Some((4, 1)), twice(number, None))];
+        rejects(file, &format!("field {number} of a type"));
+    }
+    for number in 1..=3 {
+        let mut file = two_stripes();
+        file.stripes[0].footer_appends = vec![(Some((1, 0)), twice(number, None))];
+        rejects(file, &format!("field {number} of a stream"));
+        let mut file = two_stripes();
+        file.stripes[0].footer_appends = vec![(Some((2, 0)), twice(number, None))];
+        rejects(file, &format!("field {number} of a column encoding"));
+    }
+    let mut file = two_stripes();
+    file.stripes[0].footer_appends = vec![(None, twice(3, Some(b"x")))];
+    rejects(file, "field 3 of a stripe footer");
 }
