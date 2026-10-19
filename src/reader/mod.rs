@@ -205,3 +205,24 @@ mod async_opendal_reader {
 
 #[cfg(all(feature = "async", feature = "opendal"))]
 pub use async_opendal_reader::AsyncOpendalReader;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "panics on an offset past the end of the input"]
+    fn test_bytes_get_read_offset_past_end() {
+        let bytes = Bytes::from_static(&[1, 2, 3]);
+        assert!(bytes.get_read(4).is_err());
+        assert!(bytes.get_bytes(4, 1).is_err());
+    }
+
+    #[test]
+    #[ignore = "allocates the requested length before reading"]
+    fn test_get_bytes_length_beyond_input() {
+        let bytes = Bytes::from_static(&[1, 2, 3]);
+        assert!(bytes.get_bytes(1, u64::MAX / 2).is_err());
+        assert_eq!(bytes.get_bytes(1, 2).unwrap().as_ref(), &[2, 3]);
+    }
+}

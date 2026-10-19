@@ -318,7 +318,13 @@ fn worker(seed_dir: &Path, out_dir: &Path, rng_seed: u64, start: usize, count: u
         } else {
             String::new()
         };
-        *PANIC.lock().unwrap() = format!("{} @ {}", msg.replace('\n', " "), loc);
+        let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+        let frame = backtrace
+            .lines()
+            .map(str::trim)
+            .find(|l| l.contains("orc_rust::") && !l.contains("fuzz_mutate"))
+            .unwrap_or("");
+        *PANIC.lock().unwrap() = format!("{} @ {} in {}", msg.replace('\n', " "), loc, frame);
     }));
     let seeds = seed_files(seed_dir);
     let seed_data: Vec<Vec<u8>> = seeds.iter().map(|p| std::fs::read(p).unwrap()).collect();
