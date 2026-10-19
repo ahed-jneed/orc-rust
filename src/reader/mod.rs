@@ -22,6 +22,31 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 
 use bytes::{Buf, Bytes};
 
+/// Largest buffer reserved up front for a read whose source cannot report how many bytes
+/// it still holds. Longer reads grow past this as bytes actually arrive.
+const MAX_UNVERIFIED_PREALLOCATION: u64 = 8 * 1024 * 1024;
+
+/// How much to reserve for reading `length` bytes when `available` bytes remain in the
+/// source, if known. The requested length comes from file metadata so it is never trusted
+/// beyond what the source can hold.
+fn initial_capacity(length: u64, available: Option<u64>) -> usize {
+    let bound = available.unwrap_or(MAX_UNVERIFIED_PREALLOCATION);
+    usize::try_from(length.min(bound)).unwrap_or(0)
+}
+
+fn read_exact_bounded(
+    reader: impl Read,
+    length: u64,
+    available: Option<u64>,
+) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(initial_capacity(length, available));
+    reader.take(length).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != length {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok(bytes)
+}
+
 /// Primary source used for reading required bytes for operations.
 #[allow(clippy::len_without_is_empty)]
 pub trait ChunkReader {
@@ -37,14 +62,9 @@ pub trait ChunkReader {
 
     /// Read bytes from an offset with specific length.
     fn get_bytes(&self, offset_from_start: u64, length: u64) -> std::io::Result<Bytes> {
-        let mut bytes = Vec::new();
-        self.get_read(offset_from_start)?
-            .take(length)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 != length {
-            return Err(std::io::ErrorKind::UnexpectedEof.into());
-        }
-        Ok(bytes.into())
+        let available = self.len().checked_sub(offset_from_start);
+        let reader = self.get_read(offset_from_start)?;
+        Ok(read_exact_bounded(reader, length, available)?.into())
     }
 }
 
@@ -80,6 +100,16 @@ impl ChunkReader for Bytes {
             .ok_or(std::io::ErrorKind::UnexpectedEof)?;
         Ok(self.slice(offset..).reader())
     }
+
+    fn get_bytes(&self, offset_from_start: u64, length: u64) -> std::io::Result<Bytes> {
+        let range = usize::try_from(offset_from_start)
+            .ok()
+            .zip(usize::try_from(length).ok())
+            .and_then(|(offset, length)| Some(offset..offset.checked_add(length)?))
+            .filter(|range| range.end <= self.len())
+            .ok_or(std::io::ErrorKind::UnexpectedEof)?;
+        Ok(self.slice(range))
+    }
 }
 
 #[cfg(feature = "async")]
@@ -113,8 +143,13 @@ mod async_chunk_reader {
             length: u64,
         ) -> BoxFuture<'_, std::io::Result<Bytes>> {
             async move {
+                let available = self
+                    .seek(SeekFrom::End(0))
+                    .await?
+                    .checked_sub(offset_from_start);
                 self.seek(SeekFrom::Start(offset_from_start)).await?;
-                let mut buffer = Vec::new();
+                let capacity = initial_capacity(length, available);
+                let mut buffer = Vec::with_capacity(capacity);
                 (&mut *self).take(length).read_to_end(&mut buffer).await?;
                 if buffer.len() as u64 != length {
                     return Err(std::io::ErrorKind::UnexpectedEof.into());
@@ -225,6 +260,35 @@ mod tests {
         let bytes = Bytes::from_static(&[1, 2, 3]);
         assert!(bytes.get_read(4).is_err());
         assert!(bytes.get_bytes(4, 1).is_err());
+    }
+
+    #[test]
+    fn test_get_bytes_is_zero_copy_for_bytes() {
+        let bytes = Bytes::from(vec![7; 1024]);
+        let slice = bytes.get_bytes(100, 200).unwrap();
+        assert_eq!(slice.len(), 200);
+        assert_eq!(slice.as_ptr(), bytes[100..].as_ptr());
+        assert!(bytes.get_bytes(900, 125).is_err());
+        assert!(bytes.get_bytes(u64::MAX, 2).is_err());
+    }
+
+    #[test]
+    fn test_read_exact_bounded_allocates_exact_size() {
+        let length = 64 * 1024 * 1024;
+        let data = vec![1_u8; length];
+        let read = read_exact_bounded(&data[..], length as u64, Some(length as u64)).unwrap();
+        assert_eq!(read.len(), length);
+        assert_eq!(read.capacity(), length);
+    }
+
+    #[test]
+    fn test_read_exact_bounded_refuses_hostile_length() {
+        let data = [1, 2, 3];
+        let length = u64::MAX / 2;
+        assert!(initial_capacity(length, Some(3)) <= 3);
+        assert!(initial_capacity(length, None) as u64 <= MAX_UNVERIFIED_PREALLOCATION);
+        assert!(read_exact_bounded(&data[..], length, Some(3)).is_err());
+        assert!(read_exact_bounded(&data[..], length, None).is_err());
     }
 
     #[test]
