@@ -935,4 +935,66 @@ mod tests {
             prop_assert_eq!(out, values);
         }
     }
+
+    fn patched_base_stream(encoded_width: u8, data: &[u8]) -> Vec<u8> {
+        let mut stream = vec![0b_1000_0000 | (encoded_width << 1), 0, 0, 0, 0];
+        stream.extend_from_slice(data);
+        stream.push(0);
+        stream
+    }
+
+    fn decode_all<N: NInt>(data: &[u8], count: usize) -> Result<Vec<N>> {
+        let mut reader = RleV2Decoder::<N, _, UnsignedEncoding>::new(Cursor::new(data.to_vec()));
+        let mut out = vec![N::zero(); count];
+        reader.decode(&mut out)?;
+        Ok(out)
+    }
+
+    #[test]
+    #[ignore = "Iqleb #3478: panics instead of returning an error"]
+    fn test_patched_base_width_exceeds_i16() {
+        // 24 and 32 bit widths are byte aligned, 26 is not
+        for (encoded_width, bytes) in [(23, 3), (24, 4), (27, 4), (31, 8)] {
+            let stream = patched_base_stream(encoded_width, &vec![0; bytes]);
+            assert!(decode_all::<i16>(&stream, 1).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "Iqleb #3478: panics instead of returning an error"]
+    fn test_patched_base_width_exceeds_i32() {
+        for (encoded_width, bytes) in [(28, 5), (30, 7), (31, 8)] {
+            let stream = patched_base_stream(encoded_width, &vec![0; bytes]);
+            assert!(decode_all::<i32>(&stream, 1).is_err());
+        }
+    }
+
+    #[test]
+    fn test_patched_base_width_fits_column() {
+        let stream = patched_base_stream(15, &[0, 7]);
+        assert_eq!(decode_all::<i16>(&stream, 1).unwrap(), vec![7]);
+    }
+
+    #[test]
+    fn test_short_repeat_width_exceeds_column() {
+        // 4 byte value in an i16 column
+        let stream = [0b_0001_1000, 0, 0, 0, 1];
+        assert!(decode_all::<i16>(&stream, 3).is_err());
+    }
+
+    #[test]
+    #[ignore = "Iqleb #3478: panics instead of returning an error"]
+    fn test_delta_single_value_with_delta_width() {
+        let stream = [0b_1100_0010, 0, 0, 0];
+        assert!(decode_all::<i64>(&stream, 1).is_err());
+    }
+
+    #[test]
+    #[ignore = "Iqleb #3478: panics instead of returning an error"]
+    fn test_delta_base_i64_min() {
+        let mut stream = vec![0b_1100_0000, 1, 0];
+        stream.extend([0xFF; 9]);
+        stream.push(1);
+        assert!(decode_all::<i64>(&stream, 2).is_err());
+    }
 }
