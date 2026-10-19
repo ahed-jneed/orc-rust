@@ -26,14 +26,15 @@ use snafu::{ensure, OptionExt, ResultExt};
 use crate::encoding::decimal::UnboundedVarintStreamDecoder;
 use crate::encoding::integer::{get_signed_int_decoder, RleVersion};
 use crate::encoding::PrimitiveValueDecoder;
-use crate::error::{ArrowSnafu, DecimalScaleLossSnafu, OutOfSpecSnafu};
+use crate::error::{ArrowSnafu, DecimalScaleLossSnafu, InvalidDecimalTypeSnafu, OutOfSpecSnafu};
+use crate::proto::column_encoding::Kind as EncodingKind;
 use crate::proto::stream::Kind;
 use crate::stripe::Stripe;
 use crate::{column::Column, error::Result};
 
 use super::{ArrayBatchDecoder, PresentDecoder, PrimitiveArrayDecoder};
 
-const MAX_DECIMAL64_PRECISION: u32 = 18;
+const MAX_DECIMAL64_PRECISION: u8 = 18;
 
 struct Decimal64Decoder {
     iter: Box<dyn PrimitiveValueDecoder<i64> + Send>,
@@ -48,10 +49,15 @@ impl PrimitiveValueDecoder<i128> for Decimal64Decoder {
         let mut values = vec![0; out.len()];
         self.iter.decode(&mut values)?;
         for (o, v) in out.iter_mut().zip(values) {
-            *o = v as i128;
+            *o = i128::from(v);
         }
         Ok(())
     }
+}
+
+enum DecimalLayout {
+    Decimal64,
+    Legacy,
 }
 
 pub fn new_decimal_decoder(
@@ -60,22 +66,18 @@ pub fn new_decimal_decoder(
     precision: u32,
     fixed_scale: u32,
     scale_unspecified: bool,
-) -> Box<dyn ArrayBatchDecoder> {
-    if precision <= MAX_DECIMAL64_PRECISION
-        && stripe
-            .stream_map()
-            .get_opt(column, Kind::Secondary)
-            .is_none()
-    {
+) -> Result<Box<dyn ArrayBatchDecoder>> {
+    let (precision, scale) = decimal_type(column, precision, fixed_scale)?;
+    if let DecimalLayout::Decimal64 = decimal_layout(column, stripe, precision)? {
         let data = stripe.stream_map().get(column, Kind::Data);
         let iter = get_signed_int_decoder::<i64>(data, RleVersion::V2);
         let present = PresentDecoder::from_stripe(stripe, column);
-        return Box::new(DecimalArrayDecoder::new(
-            precision as u8,
-            fixed_scale as i8,
+        return Ok(Box::new(DecimalArrayDecoder::new(
+            precision,
+            scale,
             Box::new(Decimal64Decoder { iter }),
             present,
-        ));
+        )));
     }
 
     let varint_iter = stripe.stream_map().get(column, Kind::Data);
@@ -93,17 +95,108 @@ pub fn new_decimal_decoder(
         fixed_scale,
         unspecified_scale: scale_unspecified.then(|| UnspecifiedScale {
             column: column.name().to_string(),
-            precision: precision as u8,
+            precision,
         }),
     };
     let iter = Box::new(iter);
 
-    Box::new(DecimalArrayDecoder::new(
-        precision as u8,
-        fixed_scale as i8,
-        iter,
-        present,
-    ))
+    Ok(Box::new(DecimalArrayDecoder::new(
+        precision, scale, iter, present,
+    )))
+}
+
+fn decimal_type(column: &Column, precision: u32, scale: u32) -> Result<(u8, i8)> {
+    let invalid = || {
+        InvalidDecimalTypeSnafu {
+            column: column.name().to_string(),
+            precision,
+            scale,
+        }
+        .build()
+    };
+    let narrow_precision = u8::try_from(precision)
+        .ok()
+        .filter(|precision| (1..=Decimal128Type::MAX_PRECISION).contains(precision))
+        .ok_or_else(invalid)?;
+    let narrow_scale = u8::try_from(scale)
+        .ok()
+        .filter(|scale| *scale <= narrow_precision)
+        .and_then(|scale| i8::try_from(scale).ok())
+        .ok_or_else(invalid)?;
+    Ok((narrow_precision, narrow_scale))
+}
+
+fn decimal_layout(column: &Column, stripe: &Stripe, precision: u8) -> Result<DecimalLayout> {
+    let mut present = 0;
+    let mut data = 0;
+    let mut secondary = 0;
+    let mut row_index = 0;
+    let mut bloom_filter = 0;
+    let mut bloom_filter_utf8 = 0;
+    for kind in column.stream_kinds() {
+        let count = match kind {
+            Some(Kind::Present) => &mut present,
+            Some(Kind::Data) => &mut data,
+            Some(Kind::Secondary) => &mut secondary,
+            Some(Kind::RowIndex) => &mut row_index,
+            Some(Kind::BloomFilter) => &mut bloom_filter,
+            Some(Kind::BloomFilterUtf8) => &mut bloom_filter_utf8,
+            other => {
+                return OutOfSpecSnafu {
+                    msg: format!(
+                        "decimal column '{}' has an unexpected {other:?} stream",
+                        column.name()
+                    ),
+                }
+                .fail()
+            }
+        };
+        *count += 1;
+        ensure!(
+            *count == 1,
+            OutOfSpecSnafu {
+                msg: format!(
+                    "decimal column '{}' has more than one {kind:?} stream",
+                    column.name()
+                ),
+            }
+        );
+    }
+    if precision <= MAX_DECIMAL64_PRECISION && stripe.decimal64_file() {
+        ensure!(
+            secondary == 0,
+            OutOfSpecSnafu {
+                msg: format!(
+                    "decimal column '{}' of precision {precision} has a SECONDARY stream in a Decimal64 file",
+                    column.name()
+                ),
+            }
+        );
+        ensure!(
+            matches!(
+                column.encoding().kind(),
+                EncodingKind::Direct | EncodingKind::DirectV2
+            ),
+            OutOfSpecSnafu {
+                msg: format!(
+                    "decimal column '{}' of a Decimal64 file has encoding {:?}",
+                    column.name(),
+                    column.encoding().kind()
+                ),
+            }
+        );
+        return Ok(DecimalLayout::Decimal64);
+    }
+    ensure!(
+        data == secondary,
+        OutOfSpecSnafu {
+            msg: format!(
+                "decimal column '{}' needs both a DATA and a SECONDARY stream or neither",
+                column.name()
+            ),
+        }
+    );
+    Ok(DecimalLayout::Legacy)
 }
 
 /// Wrapper around PrimitiveArrayDecoder to allow specifying the precision and scale
@@ -202,10 +295,9 @@ fn fix_i128_scale(
     varying_scale: i32,
     lossless_column: Option<&str>,
 ) -> Result<i128> {
-    // TODO: Verify with C++ impl in ORC repo, which does this cast
-    //       Not sure why scale stream can be signed if it gets casted to unsigned anyway
-    //       https://github.com/apache/orc/blob/0014bec1e4cdd1206f5bae4f5c2000b9300c6eb1/c%2B%2B/src/ColumnReader.cc#L1459-L1476
-    let varying_scale = varying_scale as u32;
+    let varying_scale = u32::try_from(varying_scale).ok().context(OutOfSpecSnafu {
+        msg: "decimal value has a negative scale",
+    })?;
     match fixed_scale.cmp(&varying_scale) {
         Ordering::Less => {
             // fixed_scale < varying_scale
@@ -253,4 +345,60 @@ fn scale_factor_pow10(exponent: u32) -> Result<i128> {
     10_i128.checked_pow(exponent).context(OutOfSpecSnafu {
         msg: "decimal scale difference is out of range",
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::StripeFooter;
+    use crate::schema::DataType;
+
+    fn decimal_column() -> Column {
+        let data_type = DataType::Decimal {
+            column_index: 0,
+            precision: 10,
+            scale: 2,
+            scale_unspecified: false,
+        };
+        Column::new(
+            "d".to_string(),
+            data_type,
+            Arc::new(StripeFooter::default()),
+        )
+    }
+
+    #[test]
+    fn decimal_type_bounds() {
+        let column = decimal_column();
+        assert_eq!(decimal_type(&column, 1, 0).unwrap(), (1, 0));
+        assert_eq!(decimal_type(&column, 1, 1).unwrap(), (1, 1));
+        assert_eq!(decimal_type(&column, 38, 38).unwrap(), (38, 38));
+        assert_eq!(decimal_type(&column, 12, 2).unwrap(), (12, 2));
+        for (precision, scale) in [
+            (0, 0),
+            (1, 2),
+            (12, 13),
+            (12, 127),
+            (12, 128),
+            (12, 255),
+            (12, 256),
+            (38, 39),
+            (39, 2),
+            (256, 0),
+            (u32::MAX, 0),
+            (12, u32::MAX),
+        ] {
+            assert!(
+                decimal_type(&column, precision, scale).is_err(),
+                "({precision}, {scale})"
+            );
+        }
+    }
+
+    #[test]
+    fn negative_value_scale_is_rejected() {
+        assert!(fix_i128_scale(0, 2, -1, Some("a")).is_err());
+        assert!(fix_i128_scale(7, 2, -1, None).is_err());
+        assert_eq!(fix_i128_scale(7, 2, 2, None).unwrap(), 7);
+    }
 }
