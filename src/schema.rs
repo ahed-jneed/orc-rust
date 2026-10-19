@@ -28,7 +28,7 @@ use crate::proto;
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit, UnionMode};
 
 const UNSPECIFIED_DECIMAL_PRECISION: u32 = 38;
-const UNSPECIFIED_DECIMAL_SCALE: u32 = 6;
+const UNSPECIFIED_DECIMAL_SCALE: u32 = 10;
 
 /// Configuration for timestamp precision when converting ORC timestamps to Arrow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -285,6 +285,7 @@ pub enum DataType {
         // TODO: narrow to u8
         precision: u32,
         scale: u32,
+        scale_unspecified: bool,
     },
     /// Represents specific date and time, down to the nanosecond, as offset
     /// since 1st January 2015, with no timezone.
@@ -488,15 +489,20 @@ impl DataType {
                 }
             }
             Kind::Decimal => {
-                let (precision, scale) = match (ty.precision(), ty.scale()) {
-                    (0, 0) => (UNSPECIFIED_DECIMAL_PRECISION, UNSPECIFIED_DECIMAL_SCALE),
-                    (0, scale) => (UNSPECIFIED_DECIMAL_PRECISION, scale),
-                    recorded => recorded,
+                let (precision, scale, scale_unspecified) = match (ty.precision(), ty.scale()) {
+                    (0, 0) => (
+                        UNSPECIFIED_DECIMAL_PRECISION,
+                        UNSPECIFIED_DECIMAL_SCALE,
+                        true,
+                    ),
+                    (0, scale) => (UNSPECIFIED_DECIMAL_PRECISION, scale, false),
+                    (precision, scale) => (precision, scale, false),
                 };
                 Self::Decimal {
                     column_index,
                     precision,
                     scale,
+                    scale_unspecified,
                 }
             }
             Kind::Date => Self::Date { column_index },
@@ -622,6 +628,7 @@ impl Display for DataType {
                 column_index: _,
                 precision,
                 scale,
+                scale_unspecified: _,
             } => write!(f, "DECIMAL({precision}, {scale})"),
             DataType::Timestamp { column_index: _ } => write!(f, "TIMESTAMP"),
             DataType::TimestampWithLocalTimezone { column_index: _ } => {

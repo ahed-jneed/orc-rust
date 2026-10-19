@@ -20,13 +20,13 @@ use std::sync::Arc;
 
 use arrow::array::ArrayRef;
 use arrow::buffer::NullBuffer;
-use arrow::datatypes::Decimal128Type;
-use snafu::{OptionExt, ResultExt};
+use arrow::datatypes::{Decimal128Type, DecimalType};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::encoding::decimal::UnboundedVarintStreamDecoder;
 use crate::encoding::integer::{get_signed_int_decoder, RleVersion};
 use crate::encoding::PrimitiveValueDecoder;
-use crate::error::{ArrowSnafu, OutOfSpecSnafu};
+use crate::error::{ArrowSnafu, DecimalScaleLossSnafu, OutOfSpecSnafu};
 use crate::proto::stream::Kind;
 use crate::stripe::Stripe;
 use crate::{column::Column, error::Result};
@@ -59,6 +59,7 @@ pub fn new_decimal_decoder(
     stripe: &Stripe,
     precision: u32,
     fixed_scale: u32,
+    scale_unspecified: bool,
 ) -> Box<dyn ArrayBatchDecoder> {
     if precision <= MAX_DECIMAL64_PRECISION
         && stripe
@@ -90,6 +91,10 @@ pub fn new_decimal_decoder(
         varint_iter,
         scale_iter,
         fixed_scale,
+        unspecified_scale: scale_unspecified.then(|| UnspecifiedScale {
+            column: column.name().to_string(),
+            precision: precision as u8,
+        }),
     };
     let iter = Box::new(iter);
 
@@ -151,6 +156,12 @@ struct DecimalScaleRepairDecoder {
     varint_iter: Box<dyn PrimitiveValueDecoder<i128> + Send>,
     scale_iter: Box<dyn PrimitiveValueDecoder<i32> + Send>,
     fixed_scale: u32,
+    unspecified_scale: Option<UnspecifiedScale>,
+}
+
+struct UnspecifiedScale {
+    column: String,
+    precision: u8,
 }
 
 impl PrimitiveValueDecoder<i128> for DecimalScaleRepairDecoder {
@@ -167,13 +178,30 @@ impl PrimitiveValueDecoder<i128> for DecimalScaleRepairDecoder {
         self.varint_iter.decode(&mut varint)?;
         self.scale_iter.decode(&mut scale)?;
         for (index, (&varint, &scale)) in varint.iter().zip(scale.iter()).enumerate() {
-            out[index] = fix_i128_scale(varint, self.fixed_scale, scale)?;
+            let column = self.unspecified_scale.as_ref().map(|u| u.column.as_str());
+            out[index] = fix_i128_scale(varint, self.fixed_scale, scale, column)?;
+            if let Some(unspecified) = &self.unspecified_scale {
+                ensure!(
+                    Decimal128Type::is_valid_decimal_precision(out[index], unspecified.precision),
+                    OutOfSpecSnafu {
+                        msg: format!(
+                            "decimal value in column '{}' does not fit precision {} at scale {}",
+                            unspecified.column, unspecified.precision, self.fixed_scale
+                        ),
+                    }
+                );
+            }
         }
         Ok(())
     }
 }
 
-fn fix_i128_scale(i: i128, fixed_scale: u32, varying_scale: i32) -> Result<i128> {
+fn fix_i128_scale(
+    i: i128,
+    fixed_scale: u32,
+    varying_scale: i32,
+    lossless_column: Option<&str>,
+) -> Result<i128> {
     // TODO: Verify with C++ impl in ORC repo, which does this cast
     //       Not sure why scale stream can be signed if it gets casted to unsigned anyway
     //       https://github.com/apache/orc/blob/0014bec1e4cdd1206f5bae4f5c2000b9300c6eb1/c%2B%2B/src/ColumnReader.cc#L1459-L1476
@@ -185,6 +213,22 @@ fn fix_i128_scale(i: i128, fixed_scale: u32, varying_scale: i32) -> Result<i128>
             // So need to divide to align the scale
             // TODO: this differs from C++ implementation, need to verify
             let scale_factor = varying_scale - fixed_scale;
+            if let Some(column) = lossless_column {
+                let lossy = || {
+                    DecimalScaleLossSnafu {
+                        column,
+                        value_scale: varying_scale,
+                        column_scale: fixed_scale,
+                    }
+                    .build()
+                };
+                return match 10_i128.checked_pow(scale_factor) {
+                    Some(scale_factor) if i % scale_factor == 0 => Ok(i / scale_factor),
+                    Some(_) => Err(lossy()),
+                    None if i == 0 => Ok(0),
+                    None => Err(lossy()),
+                };
+            }
             // TODO: replace with lookup table?
             let scale_factor = scale_factor_pow10(scale_factor)?;
             Ok(i / scale_factor)

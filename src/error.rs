@@ -143,6 +143,20 @@ pub enum OrcError {
         scale: u32,
     },
 
+    #[snafu(display(
+        "Column '{}' has a decimal value with scale {} that cannot be represented exactly in scale {}, the scale of a decimal type recorded without a scale",
+        column,
+        value_scale,
+        column_scale,
+    ))]
+    DecimalScaleLoss {
+        #[snafu(implicit)]
+        location: Location,
+        column: String,
+        value_scale: u32,
+        column_scale: u32,
+    },
+
     #[snafu(display("Failed to convert to record batch: {}", source))]
     ConvertRecordBatch {
         #[snafu(implicit)]

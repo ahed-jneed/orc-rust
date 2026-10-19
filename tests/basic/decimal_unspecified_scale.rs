@@ -193,7 +193,10 @@ fn test_unspecified_decimal_overflow_is_an_error() {
     for column in ["ov38", "ov29"] {
         for batch_size in BATCH_SIZES {
             let message = error_of(OVERFLOW, column, batch_size);
-            assert!(!message.is_empty());
+            assert!(
+                message.contains("overflows") || message.contains(column),
+                "{message}"
+            );
         }
     }
 }

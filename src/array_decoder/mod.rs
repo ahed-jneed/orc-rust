@@ -484,7 +484,10 @@ pub fn array_decoder_factory(
         (DataType::Binary { .. }, ArrowDataType::Binary) => new_binary_decoder(column, stripe)?,
         (
             DataType::Decimal {
-                precision, scale, ..
+                precision,
+                scale,
+                scale_unspecified,
+                ..
             },
             ArrowDataType::Decimal128(a_precision, a_scale),
         ) if *precision as u8 == *a_precision && *scale as i8 == *a_scale => {
@@ -497,7 +500,7 @@ pub fn array_decoder_factory(
                     scale: *scale,
                 }
             );
-            new_decimal_decoder(column, stripe, *precision, *scale)
+            new_decimal_decoder(column, stripe, *precision, *scale, *scale_unspecified)
         }
         (DataType::Timestamp { .. }, field_type) => {
             new_timestamp_decoder(column, field_type.clone(), stripe)?
