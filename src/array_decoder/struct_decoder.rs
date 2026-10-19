@@ -71,8 +71,12 @@ impl ArrayBatchDecoder for StructArrayDecoder {
             .collect::<Result<Vec<_>>>()?;
 
         let null_buffer = present;
-        let array = StructArray::try_new(self.fields.clone(), child_arrays, null_buffer)
-            .context(ArrowSnafu)?;
+        let array = if self.fields.is_empty() {
+            StructArray::new_empty_fields(batch_size, null_buffer)
+        } else {
+            StructArray::try_new(self.fields.clone(), child_arrays, null_buffer)
+                .context(ArrowSnafu)?
+        };
         let array = Arc::new(array);
         Ok(array)
     }
