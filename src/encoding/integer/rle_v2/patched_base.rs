@@ -26,7 +26,8 @@ use crate::{
         integer::{
             util::{
                 encode_bit_width, extract_run_length_from_header, get_closest_fixed_bits,
-                read_ints, rle_v2_decode_bit_width, signed_msb_encode, write_packed_ints,
+                read_ints, rle_v2_decode_bit_width, signed_msb_decode, signed_msb_encode,
+                write_packed_ints,
             },
             EncodingSign, VarintSerde,
         },
@@ -72,7 +73,7 @@ pub fn read_patched_base<N: NInt, R: Read, S: EncodingSign>(
     // Read base value as i64 directly
     // This matches Java ORC's implementation which always uses long for base values
     let base = i64::read_big_endian(reader, base_byte_width)?;
-    let base = S::decode_signed_msb(base, base_byte_width);
+    let base = signed_msb_decode(base, base_byte_width);
     let base = N::from_i64(base);
 
     // Get data values
