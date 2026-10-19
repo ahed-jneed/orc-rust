@@ -301,7 +301,14 @@ fn validate_type_tree(types: &[proto::Type]) -> Result<()> {
                     )
                 }
             ),
-            _ => continue,
+            kind => ensure!(
+                ty.subtypes.is_empty() && ty.field_names.is_empty(),
+                UnexpectedSnafu {
+                    msg: format!(
+                        "{kind:?} type for column index {column_index} cannot have subtypes or field names"
+                    )
+                }
+            ),
         }
         for &subtype in &ty.subtypes {
             let subtype = subtype as usize;

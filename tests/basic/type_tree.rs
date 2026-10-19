@@ -282,14 +282,6 @@ fn test_types_that_nothing_refers_to_are_not_checked() {
 }
 
 #[test]
-fn test_subtypes_of_scalar_types_are_ignored() {
-    let mut scalar = leaf();
-    scalar.subtypes = vec![0, 1, 99];
-    let schema = open(vec![structure(&[1]), scalar]).unwrap();
-    assert_eq!(schema, "ROOT\n  c INTEGER");
-}
-
-#[test]
 fn test_depth_limit_is_128_levels_below_the_root() {
     assert_eq!(MAX_TYPE_TREE_DEPTH, 128);
     assert!(open(chain(128)).is_ok());
@@ -322,7 +314,6 @@ fn test_leaf_types_without_subtypes_are_read() {
 }
 
 #[test]
-#[ignore = "leaf types with subtypes are not refused yet"]
 fn test_leaf_type_with_subtypes_is_refused() {
     for kind in LEAF_KINDS {
         assert_refused(
@@ -337,7 +328,6 @@ fn test_leaf_type_with_subtypes_is_refused() {
 }
 
 #[test]
-#[ignore = "leaf types with field names are not refused yet"]
 fn test_leaf_type_with_field_names_is_refused() {
     for kind in LEAF_KINDS {
         assert_refused(
