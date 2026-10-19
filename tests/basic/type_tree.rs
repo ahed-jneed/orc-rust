@@ -295,3 +295,54 @@ fn test_depth_limit_is_128_levels_below_the_root() {
     assert!(open(chain(128)).is_ok());
     assert_refused(chain(129), "deeper");
 }
+
+const LEAF_KINDS: [Kind; 15] = [
+    Kind::Boolean,
+    Kind::Byte,
+    Kind::Short,
+    Kind::Int,
+    Kind::Long,
+    Kind::Float,
+    Kind::Double,
+    Kind::String,
+    Kind::Binary,
+    Kind::Timestamp,
+    Kind::Decimal,
+    Kind::Date,
+    Kind::Varchar,
+    Kind::Char,
+    Kind::TimestampInstant,
+];
+
+#[test]
+fn test_leaf_types_without_subtypes_are_read() {
+    for kind in LEAF_KINDS {
+        assert!(open(vec![structure(&[1]), node(kind, &[], &[])]).is_ok());
+    }
+}
+
+#[test]
+#[ignore = "leaf types with subtypes are not refused yet"]
+fn test_leaf_type_with_subtypes_is_refused() {
+    for kind in LEAF_KINDS {
+        assert_refused(
+            vec![structure(&[1]), node(kind, &[2], &[]), leaf()],
+            "cannot have subtypes or field names",
+        );
+        assert_refused(
+            vec![structure(&[1]), node(kind, &[2, 3], &[]), leaf(), leaf()],
+            "cannot have subtypes or field names",
+        );
+    }
+}
+
+#[test]
+#[ignore = "leaf types with field names are not refused yet"]
+fn test_leaf_type_with_field_names_is_refused() {
+    for kind in LEAF_KINDS {
+        assert_refused(
+            vec![structure(&[1]), node(kind, &[], &["x"])],
+            "cannot have subtypes or field names",
+        );
+    }
+}
