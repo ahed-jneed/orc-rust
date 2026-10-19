@@ -24,7 +24,7 @@ use arrow::datatypes::Decimal128Type;
 use snafu::ResultExt;
 
 use crate::encoding::decimal::UnboundedVarintStreamDecoder;
-use crate::encoding::integer::get_signed_int_decoder;
+use crate::encoding::integer::{get_signed_int_decoder, RleVersion};
 use crate::encoding::PrimitiveValueDecoder;
 use crate::error::ArrowSnafu;
 use crate::proto::stream::Kind;
@@ -33,12 +33,50 @@ use crate::{column::Column, error::Result};
 
 use super::{ArrayBatchDecoder, PresentDecoder, PrimitiveArrayDecoder};
 
+const MAX_DECIMAL64_PRECISION: u32 = 18;
+
+struct Decimal64Decoder {
+    iter: Box<dyn PrimitiveValueDecoder<i64> + Send>,
+}
+
+impl PrimitiveValueDecoder<i128> for Decimal64Decoder {
+    fn skip(&mut self, n: usize) -> Result<()> {
+        self.iter.skip(n)
+    }
+
+    fn decode(&mut self, out: &mut [i128]) -> Result<()> {
+        let mut values = vec![0; out.len()];
+        self.iter.decode(&mut values)?;
+        for (o, v) in out.iter_mut().zip(values) {
+            *o = v as i128;
+        }
+        Ok(())
+    }
+}
+
 pub fn new_decimal_decoder(
     column: &Column,
     stripe: &Stripe,
     precision: u32,
     fixed_scale: u32,
 ) -> Box<dyn ArrayBatchDecoder> {
+    if precision <= MAX_DECIMAL64_PRECISION
+        && stripe
+            .stream_map()
+            .get_opt(column, Kind::Secondary)
+            .is_none()
+    {
+        let data = stripe.stream_map().get(column, Kind::Data);
+        let iter = get_signed_int_decoder::<i64>(data, RleVersion::V2);
+        let present = PresentDecoder::from_stripe(stripe, column);
+        return Box::new(DecimalArrayDecoder::new(
+            precision as u8,
+            fixed_scale as i8,
+            Box::new(Decimal64Decoder { iter }),
+            present,
+        ));
+    }
+
     let varint_iter = stripe.stream_map().get(column, Kind::Data);
     let varint_iter = Box::new(UnboundedVarintStreamDecoder::new(varint_iter));
 
