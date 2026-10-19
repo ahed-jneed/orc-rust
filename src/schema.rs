@@ -98,6 +98,7 @@ impl ArrowSchemaOptions {
 pub struct RootDataType {
     children: Vec<NamedColumn>,
     all_children: HashSet<usize>,
+    column_kinds: Vec<proto::r#type::Kind>,
 }
 
 impl RootDataType {
@@ -115,6 +116,16 @@ impl RootDataType {
     /// considering transitive children of compound types.
     pub fn contains_column_index(&self, index: usize) -> bool {
         self.all_children.contains(&index)
+    }
+
+    /// Number of columns in the file's type tree, the root included.
+    pub(crate) fn column_count(&self) -> usize {
+        self.column_kinds.len()
+    }
+
+    /// Protobuf kind of the type at a column index of the file's type tree.
+    pub(crate) fn column_kind(&self, index: usize) -> Option<proto::r#type::Kind> {
+        self.column_kinds.get(index).copied()
     }
 
     /// Number of column indices needed to cover every projected column.
@@ -163,6 +174,7 @@ impl RootDataType {
         Self {
             children,
             all_children,
+            column_kinds: self.column_kinds.clone(),
         }
     }
 
@@ -171,9 +183,11 @@ impl RootDataType {
         validate_type_tree(types)?;
         let children = parse_struct_children_from_proto(types, 0)?;
         let all_children = get_all_children_indices_set(&children);
+        let column_kinds = types.iter().map(|ty| ty.kind()).collect();
         Ok(Self {
             children,
             all_children,
+            column_kinds,
         })
     }
 }
@@ -227,6 +241,14 @@ fn validate_type_tree(types: &[proto::Type]) -> Result<()> {
     use proto::r#type::Kind;
 
     ensure!(!types.is_empty(), NoTypesSnafu {});
+    for (column_index, ty) in types.iter().enumerate() {
+        ensure!(
+            ty.kind.is_some_and(|kind| Kind::try_from(kind).is_ok()),
+            UnexpectedSnafu {
+                msg: format!("Type for column index {column_index} has no known kind")
+            }
+        );
+    }
     ensure!(
         types[0].kind() == Kind::Struct,
         UnexpectedSnafu {

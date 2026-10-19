@@ -47,10 +47,11 @@ use snafu::{ensure, OptionExt, ResultExt};
 use std::collections::HashMap;
 
 use crate::compression::{
-    read_decompressed_section_with_limit, Compression, MAX_DECOMPRESSED_SECTION_SIZE,
+    read_decompressed_section_with_limit, Compression, MAX_COMPRESSION_BLOCK_SIZE,
+    MAX_DECOMPRESSED_SECTION_SIZE,
 };
 use crate::error::{self, EmptyFileSnafu, OutOfSpecSnafu, Result};
-use crate::proto::{self, Footer, Metadata, PostScript};
+use crate::proto::{self, CompressionKind, Footer, Metadata, PostScript};
 use crate::schema::RootDataType;
 use crate::statistics::ColumnStatistics;
 use crate::stripe::StripeMetadata;
@@ -58,6 +59,9 @@ use crate::stripe::StripeMetadata;
 use crate::reader::ChunkReader;
 
 const DEFAULT_FOOTER_SIZE: u64 = 16 * 1024;
+
+/// Length of the `ORC` magic that starts every file, before the first stripe.
+const ORC_MAGIC_LENGTH: u64 = 3;
 
 /// The file's metadata.
 #[derive(Debug, Clone)]
@@ -80,7 +84,13 @@ impl FileMetadata {
         postscript: &proto::PostScript,
         footer: &proto::Footer,
         metadata: &proto::Metadata,
+        stripes_end: u64,
     ) -> Result<Self> {
+        validate_stripe_layout(footer, stripes_end)?;
+        validate_statistics(&footer.types, &footer.statistics)?;
+        for stripe_stats in &metadata.stripe_stats {
+            validate_statistics(&footer.types, &stripe_stats.col_stats)?;
+        }
         let compression =
             Compression::from_proto(postscript.compression(), postscript.compression_block_size);
         let root_data_type = RootDataType::from_proto(&footer.types)?;
@@ -210,6 +220,7 @@ pub fn read_metadata<R: ChunkReader>(reader: &mut R) -> Result<FileMetadata> {
     }
     let postscript = PostScript::decode(&tail_bytes[tail_bytes.len() - postscript_len as usize..])
         .context(error::DecodeProtoSnafu)?;
+    validate_postscript(&postscript)?;
     let compression =
         Compression::from_proto(postscript.compression(), postscript.compression_block_size);
     tail_bytes.truncate(tail_bytes.len() - postscript_len as usize);
@@ -236,6 +247,7 @@ pub fn read_metadata<R: ChunkReader>(reader: &mut R) -> Result<FileMetadata> {
             msg: "Footer and metadata extend past the end of the file"
         }
     );
+    let stripes_end = tail_payload_length - sections_length;
 
     // Ensure we have enough bytes for Footer and Metadata
     let mut tail_bytes = if sections_length > tail_bytes.len() as u64 {
@@ -272,7 +284,7 @@ pub fn read_metadata<R: ChunkReader>(reader: &mut R) -> Result<FileMetadata> {
         remaining_limit,
     )?;
 
-    FileMetadata::from_proto(&postscript, &footer, &metadata)
+    FileMetadata::from_proto(&postscript, &footer, &metadata, stripes_end)
 }
 
 #[cfg(feature = "async")]
@@ -306,6 +318,7 @@ pub async fn read_metadata_async<R: super::AsyncChunkReader>(
     }
     let postscript = PostScript::decode(&tail_bytes[tail_bytes.len() - postscript_len as usize..])
         .context(error::DecodeProtoSnafu)?;
+    validate_postscript(&postscript)?;
     let compression =
         Compression::from_proto(postscript.compression(), postscript.compression_block_size);
     tail_bytes.truncate(tail_bytes.len() - postscript_len as usize);
@@ -332,6 +345,7 @@ pub async fn read_metadata_async<R: super::AsyncChunkReader>(
             msg: "Footer and metadata extend past the end of the file"
         }
     );
+    let stripes_end = tail_payload_length - sections_length;
 
     // Ensure we have enough bytes for Footer and Metadata
     let mut tail_bytes = if sections_length > tail_bytes.len() as u64 {
@@ -369,7 +383,150 @@ pub async fn read_metadata_async<R: super::AsyncChunkReader>(
         remaining_limit,
     )?;
 
-    FileMetadata::from_proto(&postscript, &footer, &metadata)
+    FileMetadata::from_proto(&postscript, &footer, &metadata, stripes_end)
+}
+
+/// Refuses a postscript whose compression settings cannot describe a readable file.
+fn validate_postscript(postscript: &PostScript) -> Result<()> {
+    if let Some(kind) = postscript.compression {
+        let kind = CompressionKind::try_from(kind)
+            .ok()
+            .context(OutOfSpecSnafu {
+                msg: format!("Unknown compression kind {kind}"),
+            })?;
+        if kind != CompressionKind::None {
+            if let Some(size) = postscript.compression_block_size {
+                ensure!(
+                    (1..MAX_COMPRESSION_BLOCK_SIZE).contains(&size),
+                    OutOfSpecSnafu {
+                        msg: format!(
+                            "Compression block size {size} is outside 1..{MAX_COMPRESSION_BLOCK_SIZE}"
+                        )
+                    }
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuses stripes that do not lie, in order and without overlap, between the file's
+/// leading magic and the start of the metadata section (`stripes_end`), and a footer row
+/// count that is not the sum of the stripes' row counts.
+fn validate_stripe_layout(footer: &Footer, stripes_end: u64) -> Result<()> {
+    let mut next_offset = ORC_MAGIC_LENGTH;
+    let mut total_rows = 0u64;
+    for (index, stripe) in footer.stripes.iter().enumerate() {
+        let end = stripe
+            .offset()
+            .checked_add(stripe.index_length())
+            .and_then(|end| end.checked_add(stripe.data_length()))
+            .and_then(|end| end.checked_add(stripe.footer_length()))
+            .context(OutOfSpecSnafu {
+                msg: format!("Stripe {index} extent overflows"),
+            })?;
+        ensure!(
+            stripe.offset() >= next_offset,
+            OutOfSpecSnafu {
+                msg: format!(
+                    "Stripe {index} starts at {} before the end of the preceding data at {next_offset}",
+                    stripe.offset()
+                )
+            }
+        );
+        ensure!(
+            end <= stripes_end,
+            OutOfSpecSnafu {
+                msg: format!(
+                    "Stripe {index} ends at {end} after the start of the file tail at {stripes_end}"
+                )
+            }
+        );
+        next_offset = end;
+        total_rows = total_rows
+            .checked_add(stripe.number_of_rows())
+            .context(OutOfSpecSnafu {
+                msg: "Stripe row counts overflow",
+            })?;
+    }
+    ensure!(
+        footer.encryption.is_some() || next_offset == stripes_end,
+        OutOfSpecSnafu {
+            msg: format!(
+                "The last stripe ends at {next_offset} but the file tail starts at {stripes_end}"
+            )
+        }
+    );
+    if let Some(number_of_rows) = footer.number_of_rows {
+        ensure!(
+            number_of_rows == total_rows,
+            OutOfSpecSnafu {
+                msg: format!(
+                    "Footer states {number_of_rows} rows but its stripes hold {total_rows}"
+                )
+            }
+        );
+    }
+    Ok(())
+}
+
+/// Refuses column statistics that are not one per type, or that carry the typed statistics
+/// of a kind other than their column's.
+fn validate_statistics(
+    types: &[proto::Type],
+    statistics: &[proto::ColumnStatistics],
+) -> Result<()> {
+    if statistics.is_empty() {
+        return Ok(());
+    }
+    ensure!(
+        statistics.len() == types.len(),
+        OutOfSpecSnafu {
+            msg: format!(
+                "{} column statistics for {} columns",
+                statistics.len(),
+                types.len()
+            )
+        }
+    );
+    for (column, (ty, statistics)) in types.iter().zip(statistics).enumerate() {
+        use proto::r#type::Kind;
+
+        let present = [
+            statistics.int_statistics.is_some(),
+            statistics.double_statistics.is_some(),
+            statistics.string_statistics.is_some(),
+            statistics.bucket_statistics.is_some(),
+            statistics.decimal_statistics.is_some(),
+            statistics.date_statistics.is_some(),
+            statistics.binary_statistics.is_some(),
+            statistics.timestamp_statistics.is_some(),
+        ];
+        let allowed = match ty.kind() {
+            Kind::Byte | Kind::Short | Kind::Int | Kind::Long => 0,
+            Kind::Float | Kind::Double => 1,
+            Kind::String | Kind::Varchar | Kind::Char => 2,
+            Kind::Boolean => 3,
+            Kind::Decimal => 4,
+            Kind::Date => 5,
+            Kind::Binary => 6,
+            Kind::Timestamp | Kind::TimestampInstant => 7,
+            Kind::Struct | Kind::List | Kind::Map | Kind::Union => present.len(),
+        };
+        ensure!(
+            present
+                .iter()
+                .enumerate()
+                .all(|(index, present)| !present || index == allowed),
+            OutOfSpecSnafu {
+                msg: format!(
+                    "column {column} of type {:?} has statistics of another type",
+                    ty.kind()
+                )
+            }
+        );
+    }
+    Ok(())
 }
 
 fn deserialize_footer(

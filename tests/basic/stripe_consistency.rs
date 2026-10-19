@@ -321,7 +321,6 @@ fn test_file_without_stripes_reads() {
 }
 
 #[test]
-#[ignore = "stream lengths are not compared with the stripe lengths yet"]
 fn test_stream_longer_than_declared_is_refused() {
     let mut file = two_stripes();
     let length = file.stripes[0].footer.streams[0].length();
@@ -330,7 +329,6 @@ fn test_stream_longer_than_declared_is_refused() {
 }
 
 #[test]
-#[ignore = "stream lengths are not compared with the stripe lengths yet"]
 fn test_stream_shorter_than_declared_is_refused() {
     let mut file = two_stripes();
     let length = file.stripes[0].footer.streams[2].length();
@@ -339,7 +337,6 @@ fn test_stream_shorter_than_declared_is_refused() {
 }
 
 #[test]
-#[ignore = "stream lengths are not compared with the stripe lengths yet"]
 fn test_index_and_data_lengths_that_swap_bytes_are_refused() {
     let file = two_stripes().render_with(|footer, _| {
         let stripe = &mut footer.stripes[0];
@@ -350,7 +347,6 @@ fn test_index_and_data_lengths_that_swap_bytes_are_refused() {
 }
 
 #[test]
-#[ignore = "stream lengths are not compared with the stripe lengths yet"]
 fn test_stream_length_zeroed_in_the_stripe_footer_is_refused() {
     let mut file = two_stripes();
     file.stripes[1].footer.streams[0].length = Some(0);
@@ -358,7 +354,6 @@ fn test_stream_length_zeroed_in_the_stripe_footer_is_refused() {
 }
 
 #[test]
-#[ignore = "duplicate streams are not refused yet"]
 fn test_duplicate_data_stream_on_an_int_column_is_refused() {
     let replaced = stripe(
         5,
@@ -377,7 +372,6 @@ fn test_duplicate_data_stream_on_an_int_column_is_refused() {
 }
 
 #[test]
-#[ignore = "duplicate streams are not refused yet"]
 fn test_duplicate_length_stream_on_a_string_column_is_refused() {
     let doubled = stripe(
         5,
@@ -396,7 +390,6 @@ fn test_duplicate_length_stream_on_a_string_column_is_refused() {
 }
 
 #[test]
-#[ignore = "stream kinds are not checked against the column type yet"]
 fn test_length_stream_on_an_int_column_is_refused() {
     let mut file = two_stripes();
     file.stripes[0].footer.streams[0].kind = Some(Kind::Length as i32);
@@ -407,7 +400,6 @@ fn test_length_stream_on_an_int_column_is_refused() {
 }
 
 #[test]
-#[ignore = "stream kinds are not checked against the column type yet"]
 fn test_secondary_stream_on_a_string_column_is_refused() {
     let mut file = two_stripes();
     file.stripes[0].footer.streams[1].kind = Some(Kind::Secondary as i32);
@@ -418,7 +410,6 @@ fn test_secondary_stream_on_a_string_column_is_refused() {
 }
 
 #[test]
-#[ignore = "stream kinds are not checked against the column type yet"]
 fn test_data_stream_on_a_struct_column_is_refused() {
     let mut file = two_stripes();
     file.stripes[0].footer.streams[0].column = Some(0);
@@ -429,7 +420,6 @@ fn test_data_stream_on_a_struct_column_is_refused() {
 }
 
 #[test]
-#[ignore = "stream kinds are not checked against the column type yet"]
 fn test_dictionary_data_stream_on_an_int_column_is_refused() {
     let mut file = two_stripes();
     file.stripes[0].footer.streams[0].kind = Some(Kind::DictionaryData as i32);
@@ -440,7 +430,6 @@ fn test_dictionary_data_stream_on_an_int_column_is_refused() {
 }
 
 #[test]
-#[ignore = "stream kinds are not checked against the column type yet"]
 fn test_stream_of_a_column_beyond_the_type_tree_is_refused() {
     let mut file = two_stripes();
     file.stripes[0].footer.streams[0].column = Some(9);
@@ -451,7 +440,6 @@ fn test_stream_of_a_column_beyond_the_type_tree_is_refused() {
 }
 
 #[test]
-#[ignore = "stream kinds are not checked against the column type yet"]
 fn test_stream_of_unknown_kind_is_refused() {
     let mut file = two_stripes();
     file.stripes[0].footer.streams[0].kind = Some(77);
@@ -459,7 +447,6 @@ fn test_stream_of_unknown_kind_is_refused() {
 }
 
 #[test]
-#[ignore = "encoding kinds are not checked yet"]
 fn test_encoding_of_unknown_kind_is_refused() {
     let mut file = two_stripes();
     file.stripes[0].footer.columns[1].kind = Some(9);
@@ -467,7 +454,6 @@ fn test_encoding_of_unknown_kind_is_refused() {
 }
 
 #[test]
-#[ignore = "the footer row count is not compared with its stripes yet"]
 fn test_footer_row_count_above_the_stripes_is_refused() {
     let file = two_stripes().render_with(|footer, _| {
         footer.number_of_rows = Some(footer.number_of_rows() + 1);
@@ -476,7 +462,6 @@ fn test_footer_row_count_above_the_stripes_is_refused() {
 }
 
 #[test]
-#[ignore = "the footer row count is not compared with its stripes yet"]
 fn test_footer_row_count_below_the_stripes_is_refused() {
     let file = two_stripes().render_with(|footer, _| {
         footer.number_of_rows = Some(footer.number_of_rows() - 1);
@@ -485,7 +470,6 @@ fn test_footer_row_count_below_the_stripes_is_refused() {
 }
 
 #[test]
-#[ignore = "the footer row count is not compared with its stripes yet"]
 fn test_stripe_row_count_contradicting_the_footer_total_is_refused() {
     let file = two_stripes().render_with(|footer, _| {
         footer.stripes[1].number_of_rows = Some(5);
@@ -494,7 +478,6 @@ fn test_stripe_row_count_contradicting_the_footer_total_is_refused() {
 }
 
 #[test]
-#[ignore = "the footer row count is not compared with its stripes yet"]
 fn test_footer_without_stripes_but_with_rows_is_refused() {
     let file = OrcFile::new(vec![]).render_with(|footer, _| {
         footer.number_of_rows = Some(3);
@@ -507,7 +490,6 @@ fn test_footer_without_stripes_but_with_rows_is_refused() {
 }
 
 #[test]
-#[ignore = "stripe placement is not validated yet"]
 fn test_stripe_ending_beyond_the_file_tail_is_refused() {
     let file = two_stripes().render_with(|footer, _| {
         footer.stripes[1].data_length = Some(footer.stripes[1].data_length() + 1000);
@@ -516,7 +498,6 @@ fn test_stripe_ending_beyond_the_file_tail_is_refused() {
 }
 
 #[test]
-#[ignore = "stripe placement is not validated yet"]
 fn test_overlapping_stripes_are_refused() {
     let file = two_stripes().render_with(|footer, _| {
         footer.stripes[1].offset = Some(footer.stripes[0].offset() + 1);
@@ -525,7 +506,6 @@ fn test_overlapping_stripes_are_refused() {
 }
 
 #[test]
-#[ignore = "stripe placement is not validated yet"]
 fn test_stripes_listed_out_of_order_are_refused() {
     let file = two_stripes().render_with(|footer, _| {
         footer.stripes.swap(0, 1);
@@ -534,7 +514,6 @@ fn test_stripes_listed_out_of_order_are_refused() {
 }
 
 #[test]
-#[ignore = "stripe placement is not validated yet"]
 fn test_stripe_starting_inside_the_magic_is_refused() {
     let file = two_stripes().render_with(|footer, _| {
         footer.stripes[0].offset = Some(0);
@@ -543,7 +522,6 @@ fn test_stripe_starting_inside_the_magic_is_refused() {
 }
 
 #[test]
-#[ignore = "stripe placement is not validated yet"]
 fn test_stripe_extent_overflow_is_refused() {
     let file = two_stripes().render_with(|footer, _| {
         footer.stripes[1].offset = Some(u64::MAX - 1);
@@ -599,7 +577,6 @@ fn test_block_size_is_ignored_without_compression() {
 }
 
 #[test]
-#[ignore = "the compression block size is not validated yet"]
 fn test_compression_block_size_zero_is_refused() {
     let error = read(zlib_file(Some(0)).render(), 8192).unwrap_err();
     assert!(
@@ -609,7 +586,6 @@ fn test_compression_block_size_zero_is_refused() {
 }
 
 #[test]
-#[ignore = "the compression block size is not validated yet"]
 fn test_compression_block_size_beyond_the_chunk_header_range_is_refused() {
     for block_size in [1 << 23, 1 << 40, u64::MAX] {
         let error = read(zlib_file(Some(block_size)).render(), 8192).unwrap_err();
@@ -618,7 +594,6 @@ fn test_compression_block_size_beyond_the_chunk_header_range_is_refused() {
 }
 
 #[test]
-#[ignore = "the compression kind is not validated yet"]
 fn test_unknown_compression_kind_is_refused() {
     let file = OrcFile::new(vec![numbered_rows(0, 5)]).render_with(|_, postscript| {
         postscript.compression = Some(9);
@@ -628,7 +603,6 @@ fn test_unknown_compression_kind_is_refused() {
 }
 
 #[test]
-#[ignore = "the column count is not compared with the type tree yet"]
 fn test_stripe_footer_with_fewer_encodings_than_columns_is_refused() {
     let mut file = two_stripes();
     file.stripes[0].footer.columns.pop();
@@ -636,7 +610,6 @@ fn test_stripe_footer_with_fewer_encodings_than_columns_is_refused() {
 }
 
 #[test]
-#[ignore = "the column count is not compared with the type tree yet"]
 fn test_stripe_footer_with_more_encodings_than_columns_is_refused() {
     let mut file = two_stripes();
     file.stripes[1]
@@ -673,7 +646,6 @@ fn test_boolean_column_reads() {
 }
 
 #[test]
-#[ignore = "encoding kinds are not checked against the column type yet"]
 fn test_dictionary_encoding_on_a_boolean_column_is_refused() {
     for kind in [EncodingKind::Dictionary, EncodingKind::DictionaryV2] {
         let file = boolean_file(encoding(kind, Some(2))).render();
@@ -686,7 +658,6 @@ fn test_dictionary_encoding_on_a_boolean_column_is_refused() {
 }
 
 #[test]
-#[ignore = "encoding kinds are not checked against the column type yet"]
 fn test_dictionary_encoding_on_an_int_column_is_refused() {
     let mut file = two_stripes();
     file.stripes[0].footer.columns[1] = encoding(EncodingKind::DictionaryV2, Some(2));
@@ -742,7 +713,6 @@ fn test_dictionary_column_reads() {
 }
 
 #[test]
-#[ignore = "the dictionary size is not compared with the stripe yet"]
 fn test_dictionary_larger_than_the_stripe_is_refused() {
     let file = OrcFile::new(vec![dictionary_stripe(
         6,
@@ -758,7 +728,6 @@ fn test_dictionary_larger_than_the_stripe_is_refused() {
 }
 
 #[test]
-#[ignore = "the dictionary size is not compared with its lengths yet"]
 fn test_dictionary_size_below_the_length_entries_is_refused() {
     let file = OrcFile::new(vec![dictionary_stripe(
         1,
@@ -774,7 +743,6 @@ fn test_dictionary_size_below_the_length_entries_is_refused() {
 }
 
 #[test]
-#[ignore = "the dictionary size is not compared with its data yet"]
 fn test_dictionary_data_beyond_the_lengths_is_refused() {
     let file = OrcFile::new(vec![dictionary_stripe(
         2,
@@ -853,7 +821,6 @@ fn test_row_index_with_one_entry_per_stride_reads() {
 }
 
 #[test]
-#[ignore = "row index entries are not compared with the stride yet"]
 fn test_row_index_with_too_few_entries_is_refused() {
     let error = row_indexes(&stride_file(Some(2), 2, 0)).unwrap_err();
     assert!(
@@ -863,7 +830,6 @@ fn test_row_index_with_too_few_entries_is_refused() {
 }
 
 #[test]
-#[ignore = "row index entries are not compared with the stride yet"]
 fn test_row_index_with_too_many_entries_is_refused() {
     let error = row_indexes(&stride_file(Some(2), 4, 0)).unwrap_err();
     assert!(
@@ -873,7 +839,6 @@ fn test_row_index_with_too_many_entries_is_refused() {
 }
 
 #[test]
-#[ignore = "row index entries are not compared with the stride yet"]
 fn test_row_index_in_a_file_with_stride_zero_is_refused() {
     let error = row_indexes(&stride_file(Some(0), 1, 0)).unwrap_err();
     assert!(error.contains("stride is 0"), "{error}");
@@ -885,7 +850,6 @@ fn test_bloom_filters_matching_the_row_index_entries_read() {
 }
 
 #[test]
-#[ignore = "bloom filter counts are asserted rather than refused"]
 fn test_bloom_filters_fewer_than_row_index_entries_are_refused() {
     let error = row_indexes(&stride_file(Some(2), 3, 2)).unwrap_err();
     assert!(
@@ -896,7 +860,6 @@ fn test_bloom_filters_fewer_than_row_index_entries_are_refused() {
 
 #[cfg(feature = "async")]
 #[tokio::test]
-#[ignore = "stream lengths are not compared with the stripe lengths yet"]
 async fn test_async_reader_refuses_stream_lengths_that_do_not_add_up() {
     use futures_util::TryStreamExt;
 
@@ -974,7 +937,6 @@ fn test_gap_after_the_last_stripe_of_an_encrypted_file_reads() {
 }
 
 #[test]
-#[ignore = "statistics are not compared with the column types yet"]
 fn test_statistics_of_another_column_type_are_refused() {
     let mut statistics = typed_statistics();
     statistics.swap(1, 2);
@@ -985,7 +947,6 @@ fn test_statistics_of_another_column_type_are_refused() {
 }
 
 #[test]
-#[ignore = "statistics are not compared with the column types yet"]
 fn test_bucket_statistics_on_an_int_column_are_refused() {
     let mut statistics = typed_statistics();
     statistics[1] = bucket_statistics();
@@ -996,7 +957,6 @@ fn test_bucket_statistics_on_an_int_column_are_refused() {
 }
 
 #[test]
-#[ignore = "statistics are not compared with the column types yet"]
 fn test_integer_statistics_on_the_struct_column_are_refused() {
     let mut statistics = typed_statistics();
     statistics[0] = statistics[1].clone();
@@ -1007,7 +967,6 @@ fn test_integer_statistics_on_the_struct_column_are_refused() {
 }
 
 #[test]
-#[ignore = "statistics are not compared with the column types yet"]
 fn test_statistics_that_are_not_one_per_column_are_refused() {
     let mut statistics = typed_statistics();
     statistics.pop();
@@ -1018,7 +977,6 @@ fn test_statistics_that_are_not_one_per_column_are_refused() {
 }
 
 #[test]
-#[ignore = "statistics are not compared with the column types yet"]
 fn test_stripe_statistics_of_another_column_type_are_refused() {
     let mut file = OrcFile::new(vec![numbered_rows(0, 5)]);
     let mut statistics = typed_statistics();
@@ -1039,7 +997,6 @@ fn test_stripe_statistics_of_the_column_types_read() {
 }
 
 #[test]
-#[ignore = "the end of the last stripe is not compared with the file tail yet"]
 fn test_bytes_between_the_last_stripe_and_the_file_tail_are_refused() {
     let mut file = two_stripes();
     file.trailing = vec![0; 5];
@@ -1047,7 +1004,6 @@ fn test_bytes_between_the_last_stripe_and_the_file_tail_are_refused() {
 }
 
 #[test]
-#[ignore = "the end of the last stripe is not compared with the file tail yet"]
 fn test_bytes_after_the_magic_of_a_file_without_stripes_are_refused() {
     let mut file = OrcFile::new(vec![]);
     file.trailing = vec![0; 5];
@@ -1055,7 +1011,6 @@ fn test_bytes_after_the_magic_of_a_file_without_stripes_are_refused() {
 }
 
 #[test]
-#[ignore = "the end of the last stripe is not compared with the file tail yet"]
 fn test_last_stripe_ending_before_the_file_tail_is_refused() {
     let file = two_stripes().render_with(|footer, _| {
         footer.stripes[1].footer_length = Some(footer.stripes[1].footer_length() - 1);
@@ -1064,7 +1019,6 @@ fn test_last_stripe_ending_before_the_file_tail_is_refused() {
 }
 
 #[test]
-#[ignore = "type kinds are not required yet"]
 fn test_type_without_a_kind_is_refused() {
     let mut file = two_stripes();
     file.types[1].kind = None;
@@ -1076,7 +1030,6 @@ fn test_type_without_a_kind_is_refused() {
 }
 
 #[test]
-#[ignore = "type kinds are not required yet"]
 fn test_type_of_unknown_kind_is_refused() {
     let mut file = two_stripes();
     file.types[2].kind = Some(99);
@@ -1088,7 +1041,6 @@ fn test_type_of_unknown_kind_is_refused() {
 }
 
 #[test]
-#[ignore = "stream and encoding kinds are not required yet"]
 fn test_stream_without_a_kind_is_refused() {
     let mut file = two_stripes();
     file.stripes[0].footer.streams[0].kind = None;
@@ -1096,7 +1048,6 @@ fn test_stream_without_a_kind_is_refused() {
 }
 
 #[test]
-#[ignore = "stream and encoding kinds are not required yet"]
 fn test_encoding_without_a_kind_is_refused() {
     let mut file = two_stripes();
     file.stripes[1].footer.columns[2].kind = None;
