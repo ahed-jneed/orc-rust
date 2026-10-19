@@ -491,7 +491,7 @@ fn validate_stripe_footer(
         );
         let bytes = if matches!(
             kind,
-            Kind::RowIndex | Kind::BloomFilter | Kind::BloomFilterUtf8
+            Kind::RowIndex | Kind::BloomFilter | Kind::BloomFilterUtf8 | Kind::EncryptedIndex
         ) {
             &mut index_bytes
         } else {
@@ -537,10 +537,8 @@ fn stream_kind_fits(type_kind: TypeKind, kind: Kind) -> bool {
             type_kind,
             TypeKind::Decimal | TypeKind::Timestamp | TypeKind::TimestampInstant
         ),
-        Kind::EncryptedIndex
-        | Kind::EncryptedData
-        | Kind::StripeStatistics
-        | Kind::FileStatistics => false,
+        Kind::EncryptedIndex | Kind::EncryptedData => true,
+        Kind::StripeStatistics | Kind::FileStatistics => false,
     }
 }
 

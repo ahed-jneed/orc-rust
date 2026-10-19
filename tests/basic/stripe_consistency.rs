@@ -99,7 +99,7 @@ fn stripe(rows: u64, streams: &[(u32, Kind, Vec<u8>)], encodings: &[ColumnEncodi
     let is_index = |kind: Kind| {
         matches!(
             kind,
-            Kind::RowIndex | Kind::BloomFilter | Kind::BloomFilterUtf8
+            Kind::RowIndex | Kind::BloomFilter | Kind::BloomFilterUtf8 | Kind::EncryptedIndex
         )
     };
     let mut spec = StripeSpec {
@@ -1052,4 +1052,20 @@ fn test_encoding_without_a_kind_is_refused() {
     let mut file = two_stripes();
     file.stripes[1].footer.columns[2].kind = None;
     assert_refused(file.render(), "column 2 has no known encoding kind");
+}
+
+#[test]
+fn test_encrypted_streams_on_any_column_are_not_refused() {
+    let encrypted = stripe(
+        5,
+        &[
+            (2, Kind::EncryptedIndex, vec![0; 3]),
+            (1, Kind::Data, signed_run(&[0, 1, 2, 3, 4])),
+            (2, Kind::Length, literal_run(&[1; 5])),
+            (2, Kind::Data, b"abcde".to_vec()),
+            (0, Kind::EncryptedData, vec![0; 4]),
+        ],
+        &direct(3),
+    );
+    assert_reads(OrcFile::new(vec![encrypted]).render(), expected(0, 5));
 }
