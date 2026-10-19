@@ -105,7 +105,8 @@ fn chunk_headers(data: &[u8], start: usize, end: usize, out: &mut Vec<usize>) {
     let mut pos = start;
     while pos + 3 <= end {
         out.push(pos);
-        let raw = data[pos] as usize | (data[pos + 1] as usize) << 8 | (data[pos + 2] as usize) << 16;
+        let raw =
+            data[pos] as usize | (data[pos + 1] as usize) << 8 | (data[pos + 2] as usize) << 16;
         pos += 3 + (raw >> 1);
     }
 }
@@ -184,7 +185,11 @@ fn mutate(data: &[u8], rng: &mut Rng) -> (Vec<u8>, String) {
         1 => {
             let p = pick(rng);
             let v = [0x00, 0xFF, 0x7F, 0x80, 0x01][rng.below(5)];
-            let v = if rng.below(4) == 0 { rng.next() as u8 } else { v };
+            let v = if rng.below(4) == 0 {
+                rng.next() as u8
+            } else {
+                v
+            };
             out[p] = v;
             desc = format!("set {:#04x} in {}", v, region.name);
         }
@@ -345,7 +350,14 @@ fn worker(seed_dir: &Path, out_dir: &Path, rng_seed: u64, start: usize, count: u
                 out_dir.join(format!("panic_{rng_seed}_{i}.orc")),
             );
         }
-        writeln!(stdout.lock(), "R {} {} {}", i, status, detail.replace('\n', " ")).unwrap();
+        writeln!(
+            stdout.lock(),
+            "R {} {} {}",
+            i,
+            status,
+            detail.replace('\n', " ")
+        )
+        .unwrap();
         stdout.lock().flush().unwrap();
     }
 }
@@ -430,7 +442,14 @@ fn driver(seed_dir: &Path, out_dir: &Path, rng_seed: u64, count: usize) {
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    classify(&mut counts, &mut signatures, &current, "hang", out_dir, rng_seed);
+                    classify(
+                        &mut counts,
+                        &mut signatures,
+                        &current,
+                        "hang",
+                        out_dir,
+                        rng_seed,
+                    );
                     next = current.as_ref().map(|c| c.0 + 1).unwrap_or(next + 1);
                     break;
                 }
@@ -447,7 +466,14 @@ fn driver(seed_dir: &Path, out_dir: &Path, rng_seed: u64, count: usize) {
                     } else {
                         "abort"
                     };
-                    classify(&mut counts, &mut signatures, &current, kind, out_dir, rng_seed);
+                    classify(
+                        &mut counts,
+                        &mut signatures,
+                        &current,
+                        kind,
+                        out_dir,
+                        rng_seed,
+                    );
                     next = current.as_ref().map(|c| c.0 + 1).unwrap_or(next + 1);
                     break;
                 }
