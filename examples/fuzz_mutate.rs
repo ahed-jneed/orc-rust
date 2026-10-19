@@ -20,6 +20,7 @@
 //! `fuzz_mutate <seed-dir> <out-dir> <rng-seed> <count>` mutates seed files and reads every
 //! mutant in a supervised worker process, classifying panics, aborts, OOMs and hangs.
 //! `fuzz_mutate hash <file>...` prints a hash of the decoded contents of each file.
+//! `fuzz_mutate read-file <file>` decodes a file through the `File` reader (for timing).
 
 use std::collections::{hash_map::DefaultHasher, BTreeMap};
 use std::hash::{Hash, Hasher};
@@ -521,6 +522,13 @@ fn main() {
             args[5].parse().unwrap(),
             args[6].parse().unwrap(),
         );
+    } else if args.get(1).map(String::as_str) == Some("read-file") {
+        let file = std::fs::File::open(&args[2]).unwrap();
+        let mut rows = 0;
+        for batch in ArrowReaderBuilder::try_new(file).unwrap().build() {
+            rows += batch.unwrap().num_rows();
+        }
+        println!("{rows} rows");
     } else if args.get(1).map(String::as_str) == Some("hash") {
         for path in &args[2..] {
             let data = std::fs::read(path).unwrap();
