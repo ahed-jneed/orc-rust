@@ -30,37 +30,31 @@ fn check(name: &str) {
 }
 
 #[test]
-#[ignore = "files that decoded before the stripe consistency checks are refused"]
 fn real_writer_java_1_6_list_of_strings_with_more_dictionary_entries_than_rows() {
     check("java_1_6_14_list_of_strings_dictionary");
 }
 
 #[test]
-#[ignore = "files that decoded before the stripe consistency checks are refused"]
 fn real_writer_java_2_0_list_of_strings_with_more_dictionary_entries_than_rows() {
     check("java_2_0_7_list_of_strings_dictionary");
 }
 
 #[test]
-#[ignore = "files that decoded before the stripe consistency checks are refused"]
 fn real_writer_java_2_3_list_of_strings_with_more_dictionary_entries_than_rows() {
     check("java_2_3_1_list_of_strings_dictionary");
 }
 
 #[test]
-#[ignore = "files that decoded before the stripe consistency checks are refused"]
 fn real_writer_cpp_pyarrow_list_of_strings_with_more_dictionary_entries_than_rows() {
     check("cpp_pyarrow_list_of_strings_dictionary");
 }
 
 #[test]
-#[ignore = "files that decoded before the stripe consistency checks are refused"]
 fn real_writer_cpp_pyorc_list_of_strings_with_more_dictionary_entries_than_rows() {
     check("cpp_pyorc_list_of_strings_dictionary");
 }
 
 #[test]
-#[ignore = "an int variant of a union with values no row reads is refused"]
 fn real_writer_cpp_pyorc_union_with_a_null_int_variant_and_garbage_statistics() {
     check("cpp_pyorc_union_with_null_int_variant");
 }

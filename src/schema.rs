@@ -99,6 +99,8 @@ pub struct RootDataType {
     children: Vec<NamedColumn>,
     all_children: HashSet<usize>,
     column_kinds: Vec<proto::r#type::Kind>,
+    column_repeated: Vec<bool>,
+    column_in_union: Vec<bool>,
 }
 
 impl RootDataType {
@@ -126,6 +128,17 @@ impl RootDataType {
     /// Protobuf kind of the type at a column index of the file's type tree.
     pub(crate) fn column_kind(&self, index: usize) -> Option<proto::r#type::Kind> {
         self.column_kinds.get(index).copied()
+    }
+
+    /// Whether the column is inside a list or a map, so that it can have any number of
+    /// values for each row of the file.
+    pub(crate) fn column_is_repeated(&self, index: usize) -> bool {
+        self.column_repeated.get(index).copied().unwrap_or(false)
+    }
+
+    /// Per column of the file's type tree, whether it is a variant of a union or inside one.
+    pub(crate) fn columns_in_union(&self) -> &[bool] {
+        &self.column_in_union
     }
 
     /// Number of column indices needed to cover every projected column.
@@ -175,6 +188,8 @@ impl RootDataType {
             children,
             all_children,
             column_kinds: self.column_kinds.clone(),
+            column_repeated: self.column_repeated.clone(),
+            column_in_union: self.column_in_union.clone(),
         }
     }
 
@@ -184,10 +199,16 @@ impl RootDataType {
         let children = parse_struct_children_from_proto(types, 0)?;
         let all_children = get_all_children_indices_set(&children);
         let column_kinds = types.iter().map(|ty| ty.kind()).collect();
+        let column_repeated = columns_below(types, |kind| {
+            matches!(kind, proto::r#type::Kind::List | proto::r#type::Kind::Map)
+        });
+        let column_in_union = columns_below(types, |kind| kind == proto::r#type::Kind::Union);
         Ok(Self {
             children,
             all_children,
             column_kinds,
+            column_repeated,
+            column_in_union,
         })
     }
 }
@@ -200,6 +221,24 @@ impl Display for RootDataType {
         }
         Ok(())
     }
+}
+
+/// For every column, whether one of its ancestors has a kind that satisfies `ancestor`.
+/// Subtypes beyond the last column are ignored.
+pub(crate) fn columns_below(
+    types: &[proto::Type],
+    ancestor: impl Fn(proto::r#type::Kind) -> bool,
+) -> Vec<bool> {
+    let mut below = vec![false; types.len()];
+    for (index, ty) in types.iter().enumerate() {
+        let inside = below[index] || ancestor(ty.kind());
+        for &subtype in &ty.subtypes {
+            if let Some(flag) = below.get_mut(subtype as usize) {
+                *flag = inside;
+            }
+        }
+    }
+    below
 }
 
 fn get_all_children_indices_set(columns: &[NamedColumn]) -> HashSet<usize> {

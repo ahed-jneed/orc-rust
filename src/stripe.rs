@@ -138,6 +138,7 @@ impl TryFrom<&proto::StripeInformation> for StripeMetadata {
 #[derive(Debug)]
 pub struct Stripe {
     columns: Vec<Column>,
+    in_union: Vec<bool>,
     stream_map: StreamMap,
     number_of_rows: usize,
     tz: Option<chrono_tz::Tz>,
@@ -205,6 +206,7 @@ impl Stripe {
 
         Ok(Self {
             columns,
+            in_union: projected_data_type.columns_in_union().to_vec(),
             stream_map: StreamMap {
                 inner: stream_map,
                 compression: file_metadata.compression(),
@@ -287,6 +289,7 @@ impl Stripe {
 
         Ok(Self {
             columns,
+            in_union: projected_data_type.columns_in_union().to_vec(),
             stream_map: StreamMap {
                 inner: stream_map,
                 compression: file_metadata.compression(),
@@ -309,6 +312,15 @@ impl Stripe {
 
     pub fn stream_map(&self) -> &StreamMap {
         &self.stream_map
+    }
+
+    /// Whether the column is a variant of a union or inside one. Writers have been seen to
+    /// leave values in the streams of these columns that no row reads.
+    pub fn is_in_union(&self, column: &Column) -> bool {
+        self.in_union
+            .get(column.column_id() as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     pub fn columns(&self) -> &[Column] {
@@ -468,7 +480,7 @@ fn validate_stripe_footer(
                     msg: format!("column {column} has no dictionary size"),
                 })?);
             ensure!(
-                dictionary_size <= info.number_of_rows(),
+                schema.column_is_repeated(column) || dictionary_size <= info.number_of_rows(),
                 error::OutOfSpecSnafu {
                     msg: format!(
                         "column {column} has a dictionary of {dictionary_size} entries for {} rows",

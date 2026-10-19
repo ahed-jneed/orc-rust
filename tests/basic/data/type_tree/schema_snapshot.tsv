@@ -115,7 +115,7 @@ tests/basic/data/pyorc_decimal_unspecified_overflow.orc	43020bdfc0b4f206
 tests/basic/data/pyorc_rlev2_patchedbase.orc	cd5bd19b4c9b938a
 tests/basic/data/real_writers/cpp_pyarrow_list_of_strings_dictionary.orc	06c4b2c3bd284996
 tests/basic/data/real_writers/cpp_pyorc_list_of_strings_dictionary.orc	dc366e56a0777db7
-tests/basic/data/real_writers/cpp_pyorc_union_with_null_int_variant.orc	error
+tests/basic/data/real_writers/cpp_pyorc_union_with_null_int_variant.orc	78391766854d27e9
 tests/basic/data/real_writers/java_1_6_14_list_of_strings_dictionary.orc	dc366e56a0777db7
 tests/basic/data/real_writers/java_2_0_7_list_of_strings_dictionary.orc	dc366e56a0777db7
 tests/basic/data/real_writers/java_2_3_1_list_of_strings_dictionary.orc	dc366e56a0777db7

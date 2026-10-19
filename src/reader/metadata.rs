@@ -52,7 +52,7 @@ use crate::compression::{
 };
 use crate::error::{self, EmptyFileSnafu, OutOfSpecSnafu, Result};
 use crate::proto::{self, CompressionKind, Footer, Metadata, PostScript};
-use crate::schema::RootDataType;
+use crate::schema::{columns_below, RootDataType};
 use crate::statistics::ColumnStatistics;
 use crate::stripe::StripeMetadata;
 use crate::wire::{FOOTER, POSTSCRIPT};
@@ -494,6 +494,7 @@ fn validate_statistics(
             )
         }
     );
+    let in_union = columns_below(types, |kind| kind == proto::r#type::Kind::Union);
     for (column, (ty, statistics)) in types.iter().zip(statistics).enumerate() {
         use proto::r#type::Kind;
 
@@ -525,12 +526,13 @@ fn validate_statistics(
             _ => i64::MIN..=i64::MAX,
         };
         ensure!(
-            statistics.int_statistics.as_ref().map_or(true, |int| {
-                int.minimum
-                    .iter()
-                    .chain(&int.maximum)
-                    .all(|v| range.contains(v))
-            }),
+            in_union[column]
+                || statistics.int_statistics.as_ref().map_or(true, |int| {
+                    int.minimum
+                        .iter()
+                        .chain(&int.maximum)
+                        .all(|v| range.contains(v))
+                }),
             OutOfSpecSnafu {
                 msg: format!(
                     "column {column} of type {:?} has statistics outside the type's range",

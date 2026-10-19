@@ -20,6 +20,7 @@
 use std::{
     fmt,
     io::Read,
+    marker::PhantomData,
     ops::{BitOrAssign, ShlAssign},
 };
 
@@ -27,7 +28,7 @@ use num::traits::{CheckedShl, WrappingAdd};
 use num::{PrimInt, Signed};
 use rle_v1::RleV1Decoder;
 use rle_v2::RleV2Decoder;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use util::{get_closest_aligned_bit_width, signed_zigzag_decode, signed_zigzag_encode};
 
 use crate::error::{IoSnafu, OutOfSpecSnafu, Result};
@@ -54,6 +55,48 @@ pub fn get_signed_int_decoder<N: NInt>(
     match rle_version {
         RleVersion::V1 => Box::new(RleV1Decoder::<N, _, SignedEncoding>::new(reader)),
         RleVersion::V2 => Box::new(RleV2Decoder::<N, _, SignedEncoding>::new(reader)),
+    }
+}
+
+/// Like [`get_signed_int_decoder`], but decodes at 64 bits and only fails when a value
+/// that is read does not fit `N`, instead of when a run holds a value that does not.
+pub fn get_narrowed_signed_int_decoder<N: NInt + 'static>(
+    reader: impl Read + Send + 'static,
+    rle_version: RleVersion,
+) -> Box<dyn PrimitiveValueDecoder<N> + Send> {
+    Box::new(NarrowedIntDecoder {
+        inner: get_signed_int_decoder::<i64>(reader, rle_version),
+        buffer: Vec::new(),
+        narrowed: PhantomData,
+    })
+}
+
+struct NarrowedIntDecoder<N> {
+    inner: Box<dyn PrimitiveValueDecoder<i64> + Send>,
+    buffer: Vec<i64>,
+    narrowed: PhantomData<N>,
+}
+
+impl<N: NInt> PrimitiveValueDecoder<N> for NarrowedIntDecoder<N> {
+    fn skip(&mut self, n: usize) -> Result<()> {
+        self.inner.skip(n)
+    }
+
+    fn decode(&mut self, out: &mut [N]) -> Result<()> {
+        self.buffer.clear();
+        self.buffer.resize(out.len(), 0);
+        self.inner.decode(&mut self.buffer)?;
+        for (out, &value) in out.iter_mut().zip(&self.buffer) {
+            let narrowed = N::from_i64(value);
+            ensure!(
+                narrowed.as_i64() == value,
+                OutOfSpecSnafu {
+                    msg: "integer value exceeds byte size of integer being decoded to"
+                }
+            );
+            *out = narrowed;
+        }
+        Ok(())
     }
 }
 
@@ -310,6 +353,39 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+    use crate::encoding::PrimitiveValueEncoder;
+
+    fn wide_run() -> Vec<u8> {
+        let mut encoder = rle_v2::RleV2Encoder::<i64, SignedEncoding>::new();
+        encoder.write_slice(&[5, 1 << 46, 7]);
+        encoder.take_inner().to_vec()
+    }
+
+    #[test]
+    fn test_narrowed_decoder_reads_values_before_one_that_does_not_fit() {
+        let bytes = wide_run();
+        assert!(
+            get_signed_int_decoder::<i32>(Cursor::new(bytes.clone()), RleVersion::V2)
+                .decode(&mut [0; 1])
+                .is_err()
+        );
+        let mut decoder =
+            get_narrowed_signed_int_decoder::<i32>(Cursor::new(bytes), RleVersion::V2);
+        let mut out = [0; 1];
+        decoder.decode(&mut out).unwrap();
+        assert_eq!(out, [5]);
+        assert!(decoder.decode(&mut out).is_err());
+    }
+
+    #[test]
+    fn test_narrowed_decoder_skips_values_that_do_not_fit() {
+        let mut decoder =
+            get_narrowed_signed_int_decoder::<i16>(Cursor::new(wide_run()), RleVersion::V2);
+        decoder.skip(2).unwrap();
+        let mut out = [0; 1];
+        decoder.decode(&mut out).unwrap();
+        assert_eq!(out, [7]);
+    }
 
     #[test]
     fn test_read_big_endian_byte_size_exceeds_integer() {
