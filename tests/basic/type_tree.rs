@@ -341,7 +341,6 @@ fn test_leaf_type_with_field_names_is_refused() {
 }
 
 #[test]
-#[ignore = "unions without variants are not refused yet"]
 fn test_union_without_variants_is_refused() {
     assert_refused(
         vec![structure(&[1]), node(Kind::Union, &[], &[])],

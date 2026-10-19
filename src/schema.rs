@@ -291,16 +291,26 @@ fn validate_type_tree(types: &[proto::Type]) -> Result<()> {
                 }
             ),
             // TODO: bump this limit up to 256
-            Kind::Union => ensure!(
-                ty.subtypes.len() <= 127,
-                UnexpectedSnafu {
-                    msg: format!(
-                        "Union type for column index {} cannot exceed 127 variants, found {}",
-                        column_index,
-                        ty.subtypes.len()
-                    )
-                }
-            ),
+            Kind::Union => {
+                ensure!(
+                    !ty.subtypes.is_empty(),
+                    UnexpectedSnafu {
+                        msg: format!(
+                            "Union type for column index {column_index} must have at least one variant"
+                        )
+                    }
+                );
+                ensure!(
+                    ty.subtypes.len() <= 127,
+                    UnexpectedSnafu {
+                        msg: format!(
+                            "Union type for column index {} cannot exceed 127 variants, found {}",
+                            column_index,
+                            ty.subtypes.len()
+                        )
+                    }
+                );
+            }
             kind => ensure!(
                 ty.subtypes.is_empty() && ty.field_names.is_empty(),
                 UnexpectedSnafu {
