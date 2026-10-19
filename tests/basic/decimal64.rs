@@ -767,3 +767,30 @@ const PYORC_DECIMAL_EMPTY_0: [Option<i128>; 0] = [];
 fn test_pyorc_decimal_empty() {
     check_pyorc("pyorc_decimal_empty.orc", &[&PYORC_DECIMAL_EMPTY_0]);
 }
+
+fn read_all(file: &str, batch_size: usize) -> Result<usize, Box<dyn std::error::Error>> {
+    let f = File::open(basic_path(file)).unwrap();
+    let reader = ArrowReaderBuilder::try_new(f)?
+        .with_batch_size(batch_size)
+        .build();
+    let mut rows = 0;
+    for batch in reader {
+        rows += batch?.num_rows();
+    }
+    Ok(rows)
+}
+
+#[test]
+fn test_corrupt_decimal_scale_difference_is_an_error() {
+    for batch_size in [1, 3, 8192] {
+        let _ = read_all("fuzz_decimal_scale_difference.orc", batch_size);
+    }
+    assert!(read_all("fuzz_decimal_scale_difference.orc", 1).is_err());
+}
+
+#[test]
+fn test_stripe_footer_missing_column_encodings_is_an_error() {
+    for batch_size in [1, 3, 8192] {
+        assert!(read_all("fuzz_footer_missing_encodings.orc", batch_size).is_err());
+    }
+}

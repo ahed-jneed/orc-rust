@@ -389,6 +389,12 @@ fn validate_stream_layout(
     footer: &StripeFooter,
     start_offset: u64,
 ) -> Result<()> {
+    ensure!(
+        footer.columns.len() >= projected_data_type.required_column_count(),
+        error::OutOfSpecSnafu {
+            msg: "stripe footer has fewer column encodings than projected columns"
+        }
+    );
     let mut stream_offset = start_offset;
     let mut selected_bytes = 0u64;
     for stream in &footer.streams {
