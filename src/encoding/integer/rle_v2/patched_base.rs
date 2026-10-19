@@ -26,7 +26,8 @@ use crate::{
         integer::{
             util::{
                 encode_bit_width, extract_run_length_from_header, get_closest_fixed_bits,
-                read_ints, rle_v2_decode_bit_width, signed_msb_encode, write_packed_ints,
+                read_ints, rle_v2_decode_bit_width, signed_msb_decode, signed_msb_encode,
+                write_packed_ints,
             },
             EncodingSign, VarintSerde,
         },
@@ -72,7 +73,7 @@ pub fn read_patched_base<N: NInt, R: Read, S: EncodingSign>(
     // Read base value as i64 directly
     // This matches Java ORC's implementation which always uses long for base values
     let base = i64::read_big_endian(reader, base_byte_width)?;
-    let base = S::decode_signed_msb(base, base_byte_width);
+    let base = signed_msb_decode(base, base_byte_width);
     let base = N::from_i64(base);
 
     // Get data values
@@ -93,17 +94,21 @@ pub fn read_patched_base<N: NInt, R: Read, S: EncodingSign>(
     )?;
 
     // TODO: document and explain below logic
-    let mut patch_index = 0;
     let patch_mask = (1 << patch_bit_width) - 1;
-    let mut current_gap = unsigned_shr_64(patches[patch_index], patch_bit_width);
-    let mut current_patch = patches[patch_index] & patch_mask;
+    let patch_at = |index: usize| -> Result<(i64, i64)> {
+        let patch = *patches.get(index).context(OutOfSpecSnafu {
+            msg: "patch list is shorter than its gaps require",
+        })?;
+        Ok((unsigned_shr_64(patch, patch_bit_width), patch & patch_mask))
+    };
+    let mut patch_index = 0;
+    let (mut current_gap, mut current_patch) = patch_at(patch_index)?;
     let mut actual_gap = 0;
 
     while current_gap == 255 && current_patch == 0 {
         actual_gap += 255;
         patch_index += 1;
-        current_gap = unsigned_shr_64(patches[patch_index], patch_bit_width);
-        current_patch = patches[patch_index] & patch_mask;
+        (current_gap, current_patch) = patch_at(patch_index)?;
     }
     actual_gap += current_gap;
 
@@ -126,15 +131,13 @@ pub fn read_patched_base<N: NInt, R: Read, S: EncodingSign>(
             patch_index += 1;
 
             if patch_index < patches.len() {
-                current_gap = unsigned_shr_64(patches[patch_index], patch_bit_width);
-                current_patch = patches[patch_index] & patch_mask;
+                (current_gap, current_patch) = patch_at(patch_index)?;
                 actual_gap = 0;
 
                 while current_gap == 255 && current_patch == 0 {
                     actual_gap += 255;
                     patch_index += 1;
-                    current_gap = unsigned_shr_64(patches[patch_index], patch_bit_width);
-                    current_patch = patches[patch_index] & patch_mask;
+                    (current_gap, current_patch) = patch_at(patch_index)?;
                 }
 
                 actual_gap += current_gap;
@@ -290,9 +293,27 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use crate::encoding::integer::{util::calculate_percentile_bits, SignedEncoding};
+    use crate::encoding::integer::{
+        util::calculate_percentile_bits, SignedEncoding, UnsignedEncoding,
+    };
 
     use super::*;
+
+    #[test]
+    fn unsigned_stream_keeps_negative_base() {
+        let mut out = vec![];
+        let mut reader = Cursor::new([0x00, 0x00, 0x01, 0x81, 0x80, 0x00]);
+        read_patched_base::<i64, _, UnsignedEncoding>(&mut reader, &mut out, 0x80).unwrap();
+        assert_eq!(out, [0]);
+    }
+
+    #[test]
+    fn empty_patch_list_is_an_error() {
+        let mut out = vec![];
+        let mut reader = Cursor::new([0x00, 0x00, 0x00, 0x81, 0x80]);
+        let result = read_patched_base::<i64, _, UnsignedEncoding>(&mut reader, &mut out, 0x80);
+        assert!(result.is_err());
+    }
 
     #[derive(Debug)]
     struct PatchesStrategy {

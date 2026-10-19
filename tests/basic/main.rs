@@ -32,6 +32,7 @@ use orc_rust::projection::ProjectionMask;
 use orc_rust::TimestampPrecision;
 
 mod misc;
+mod timestamp_secondary;
 
 fn new_arrow_reader(path: &str, fields: &[&str]) -> ArrowReader<File> {
     let f = File::open(path).expect("no file found");

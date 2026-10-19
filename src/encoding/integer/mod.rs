@@ -28,9 +28,7 @@ use num::{PrimInt, Signed};
 use rle_v1::RleV1Decoder;
 use rle_v2::RleV2Decoder;
 use snafu::ResultExt;
-use util::{
-    get_closest_aligned_bit_width, signed_msb_decode, signed_zigzag_decode, signed_zigzag_encode,
-};
+use util::{get_closest_aligned_bit_width, signed_zigzag_decode, signed_zigzag_encode};
 
 use crate::error::{IoSnafu, Result};
 
@@ -73,8 +71,6 @@ pub trait EncodingSign: Send + 'static {
     // TODO: have separate type/trait to represent Zigzag encoded NInt?
     fn zigzag_decode<N: VarintSerde>(v: N) -> N;
     fn zigzag_encode<N: VarintSerde>(v: N) -> N;
-
-    fn decode_signed_msb<N: NInt>(v: N, encoded_byte_size: usize) -> N;
 }
 
 pub struct SignedEncoding;
@@ -89,11 +85,6 @@ impl EncodingSign for SignedEncoding {
     fn zigzag_encode<N: VarintSerde>(v: N) -> N {
         signed_zigzag_encode(v)
     }
-
-    #[inline]
-    fn decode_signed_msb<N: NInt>(v: N, encoded_byte_size: usize) -> N {
-        signed_msb_decode(v, encoded_byte_size)
-    }
 }
 
 pub struct UnsignedEncoding;
@@ -106,11 +97,6 @@ impl EncodingSign for UnsignedEncoding {
 
     #[inline]
     fn zigzag_encode<N: VarintSerde>(v: N) -> N {
-        v
-    }
-
-    #[inline]
-    fn decode_signed_msb<N: NInt>(v: N, _encoded_byte_size: usize) -> N {
         v
     }
 }
