@@ -38,7 +38,9 @@ mod decimal_unspecified_scale;
 mod empty_struct;
 mod misc;
 mod rle_v1_wrapping;
+mod schema_snapshot;
 mod timestamp_secondary;
+mod type_tree;
 
 fn new_arrow_reader(path: &str, fields: &[&str]) -> ArrowReader<File> {
     let f = File::open(path).expect("no file found");
