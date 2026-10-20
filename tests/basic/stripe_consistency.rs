@@ -1999,6 +1999,31 @@ fn test_unread_wide_value_of_a_short_inside_a_union_is_ignored() {
 }
 
 #[test]
+fn test_unread_wide_value_of_a_date_inside_a_union_is_ignored() {
+    let file = union_file(
+        vec![
+            node(TypeKind::Struct, &[1], &["u"]),
+            node(TypeKind::Union, &[2], &[]),
+            node(TypeKind::Date, &[], &[]),
+        ],
+        &[
+            (1, Kind::Data, TAG_ZERO.to_vec()),
+            (
+                2,
+                Kind::Data,
+                wide_after(5, 1 << 47, WIDTH_48.0, WIDTH_48.1),
+            ),
+        ],
+        3,
+    );
+    let union = read_union(file).unwrap();
+    let dates = union
+        .child(0)
+        .as_primitive::<arrow::datatypes::Date32Type>();
+    assert_eq!(dates.value(0), 5);
+}
+
+#[test]
 fn test_read_wide_value_of_a_short_inside_a_union_is_refused() {
     let file = union_file(
         vec![
