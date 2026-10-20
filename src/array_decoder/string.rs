@@ -71,7 +71,7 @@ pub fn new_string_decoder(column: &Column, stripe: &Stripe) -> Result<Box<dyn Ar
             let dictionary_size = column.dictionary_size();
             // We assume here we have fetched all the dictionary strings (according to size above)
             let mut dictionary = DirectStringArrayDecoder::new(bytes, lengths, None);
-            let dictionary_strings = dictionary.next_byte_batch(dictionary_size, None)?;
+            let dictionary_strings = dictionary.next_dictionary(dictionary_size)?;
             dictionary.ensure_exhausted()?;
             let dictionary_strings = Arc::new(dictionary_strings);
 
@@ -87,9 +87,53 @@ pub fn new_string_decoder(column: &Column, stripe: &Stripe) -> Result<Box<dyn Ar
     }
 }
 
+/// Entries of a dictionary decoded at a time, so that no buffer is sized from the number of
+/// entries the stripe footer declares before the streams hold that many.
+const DICTIONARY_CHUNK: usize = 4096;
+
 // TODO: check this offset size type
 pub type DirectStringArrayDecoder = GenericByteArrayDecoder<GenericStringType<i32>>;
 pub type BinaryArrayDecoder = GenericByteArrayDecoder<GenericBinaryType<i32>>;
+
+impl DirectStringArrayDecoder {
+    /// Reads the `size` entries of a dictionary, a chunk at a time. Memory grows with the
+    /// entries the streams really hold: a `size` they cannot satisfy ends in an error.
+    fn next_dictionary(&mut self, size: usize) -> Result<StringArray> {
+        let mut offsets = vec![0i32];
+        let mut bytes = Vec::new();
+        let mut lengths = vec![0; size.min(DICTIONARY_CHUNK)];
+        let mut remaining = size;
+        while remaining > 0 {
+            let count = remaining.min(DICTIONARY_CHUNK);
+            self.lengths.decode(&mut lengths[..count])?;
+            let total = checked_total_length(
+                &lengths[..count],
+                MAX_ARRAY_BYTES_PER_BATCH - bytes.len(),
+                "string/binary data",
+            )?;
+            let start = bytes.len();
+            self.bytes
+                .by_ref()
+                .take(total as u64)
+                .read_to_end(&mut bytes)
+                .context(IoSnafu)?;
+            ensure!(
+                bytes.len() - start == total,
+                OutOfSpecSnafu {
+                    msg: "dictionary data stream ends before its lengths"
+                }
+            );
+            let mut end = start;
+            for &length in &lengths[..count] {
+                end += length as usize;
+                offsets.push(end as i32);
+            }
+            remaining -= count;
+        }
+        StringArray::try_new(OffsetBuffer::new(offsets.into()), Buffer::from(bytes), None)
+            .context(ArrowSnafu)
+    }
+}
 
 pub struct GenericByteArrayDecoder<T: ByteArrayType> {
     bytes: Box<Decompressor>,

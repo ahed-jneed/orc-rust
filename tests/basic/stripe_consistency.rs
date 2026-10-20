@@ -1818,6 +1818,13 @@ fn test_dictionary_declared_larger_than_its_streams_inside_a_list_is_refused() {
     assert!(list_values(file.render()).is_err());
 }
 
+#[test]
+fn test_dictionary_data_ending_before_its_lengths_inside_a_list_is_refused() {
+    let file = list_of_strings_file(&[3], 3, &[1, 1, 5], b"xyz", &[2, 0, 1]);
+    let error = list_values(file.render()).unwrap_err();
+    assert!(error.contains("ends before its lengths"), "{error}");
+}
+
 #[cfg(unix)]
 const LIMITED_MEMORY_CHILD: &str = "ORC_LIMITED_MEMORY_CHILD";
 
@@ -1842,7 +1849,6 @@ fn in_limited_memory(test: &str) -> bool {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "the declared dictionary size is allocated before any entry is read"]
 fn test_huge_declared_dictionary_inside_a_list_is_refused_without_allocating() {
     if in_limited_memory(
         "test_huge_declared_dictionary_inside_a_list_is_refused_without_allocating",
@@ -1854,7 +1860,6 @@ fn test_huge_declared_dictionary_inside_a_list_is_refused_without_allocating() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "the declared dictionary size is allocated before any entry is read"]
 fn test_huge_declared_dictionary_inside_a_map_is_refused_without_allocating() {
     if in_limited_memory("test_huge_declared_dictionary_inside_a_map_is_refused_without_allocating")
     {
