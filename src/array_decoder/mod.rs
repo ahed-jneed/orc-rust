@@ -32,7 +32,7 @@ use crate::column::Column;
 use crate::encoding::boolean::BooleanDecoder;
 use crate::encoding::byte::ByteRleDecoder;
 use crate::encoding::float::FloatDecoder;
-use crate::encoding::integer::get_signed_int_decoder;
+use crate::encoding::integer::{get_narrowed_signed_int_decoder, get_signed_int_decoder};
 use crate::encoding::PrimitiveValueDecoder;
 use crate::error::{
     self, MismatchedSchemaSnafu, Result, UnexpectedSnafu, UnsupportedTypeVariantSnafu,
@@ -331,11 +331,13 @@ pub struct NaiveStripeDecoder {
     stripe: Stripe,
     schema_ref: SchemaRef,
     decoders: Vec<Box<dyn ArrayBatchDecoder>>,
+    root_present: Option<PresentDecoder>,
     index: usize,
     batch_size: usize,
     number_of_rows: usize,
     row_selection: Option<RowSelection>,
     selection_index: usize,
+    selection_offset: usize,
 }
 
 impl NaiveStripeDecoder {
@@ -359,16 +361,17 @@ impl NaiveStripeDecoder {
                     return None;
                 }
                 let selector = selectors[self.selection_index];
-                (selector.skip, selector.row_count)
+                (selector.skip, selector.row_count - self.selection_offset)
             };
+            let remaining = self.number_of_rows - self.index;
 
             if is_skip {
-                let remaining = self.number_of_rows - self.index;
                 let actual_skip = row_count.min(remaining);
 
                 if actual_skip == 0 {
                     // Nothing to skip in this stripe; try next selector
                     self.selection_index += 1;
+                    self.selection_offset = 0;
                     continue;
                 }
 
@@ -377,29 +380,32 @@ impl NaiveStripeDecoder {
                     return Some(Err(e));
                 }
                 self.index += actual_skip;
-
-                if actual_skip >= row_count {
-                    self.selection_index += 1;
-                }
+                self.consume_selected(actual_skip, row_count);
             } else {
-                let rows_to_read = row_count.min(self.batch_size);
-                let remaining = self.number_of_rows - self.index;
-                let actual_rows = rows_to_read.min(remaining);
+                let actual_rows = row_count.min(self.batch_size).min(remaining);
 
                 if actual_rows == 0 {
                     // Nothing to read from this selector in this stripe; advance selector
                     self.selection_index += 1;
+                    self.selection_offset = 0;
                     continue;
                 }
 
                 let record = self.decode_next_batch(actual_rows).transpose()?;
                 self.index += actual_rows;
-
-                if actual_rows >= row_count {
-                    self.selection_index += 1;
-                }
+                self.consume_selected(actual_rows, row_count);
                 return Some(record);
             }
+        }
+    }
+
+    /// Record that `rows` of the `row_count` rows left in the current selector are done.
+    fn consume_selected(&mut self, rows: usize, row_count: usize) {
+        if rows >= row_count {
+            self.selection_index += 1;
+            self.selection_offset = 0;
+        } else {
+            self.selection_offset += rows;
         }
     }
 }
@@ -448,13 +454,21 @@ pub fn array_decoder_factory(
         }
         (DataType::Short { .. }, ArrowDataType::Int16) => {
             let iter = stripe.stream_map().get(column, Kind::Data);
-            let iter = get_signed_int_decoder(iter, column.rle_version());
+            let iter = if stripe.is_in_union(column) {
+                get_narrowed_signed_int_decoder(iter, column.rle_version())
+            } else {
+                get_signed_int_decoder(iter, column.rle_version())
+            };
             let present = PresentDecoder::from_stripe(stripe, column);
             Box::new(Int16ArrayDecoder::new(iter, present))
         }
         (DataType::Int { .. }, ArrowDataType::Int32) => {
             let iter = stripe.stream_map().get(column, Kind::Data);
-            let iter = get_signed_int_decoder(iter, column.rle_version());
+            let iter = if stripe.is_in_union(column) {
+                get_narrowed_signed_int_decoder(iter, column.rle_version())
+            } else {
+                get_signed_int_decoder(iter, column.rle_version())
+            };
             let present = PresentDecoder::from_stripe(stripe, column);
             Box::new(Int32ArrayDecoder::new(iter, present))
         }
@@ -500,7 +514,11 @@ pub fn array_decoder_factory(
         (DataType::Date { .. }, ArrowDataType::Date32) => {
             // TODO: allow Date64
             let iter = stripe.stream_map().get(column, Kind::Data);
-            let iter = get_signed_int_decoder(iter, column.rle_version());
+            let iter = if stripe.is_in_union(column) {
+                get_narrowed_signed_int_decoder(iter, column.rle_version())
+            } else {
+                get_signed_int_decoder(iter, column.rle_version())
+            };
             let present = PresentDecoder::from_stripe(stripe, column);
             Box::new(DateArrayDecoder::new(iter, present))
         }
@@ -559,8 +577,9 @@ impl NaiveStripeDecoder {
 
         let mut fields = Vec::with_capacity(self.stripe.columns().len());
 
+        let present = derive_present_vec(&mut self.root_present, None, chunk).transpose()?;
         for decoder in &mut self.decoders {
-            let array = decoder.next_batch(chunk, None)?;
+            let array = decoder.next_batch(chunk, present.as_ref())?;
             if array.is_empty() {
                 break;
             } else {
@@ -624,24 +643,33 @@ impl NaiveStripeDecoder {
             .map(|(col, field)| array_decoder_factory(col, field.data_type(), &stripe))
             .collect::<Result<Vec<_>>>()?;
 
+        let root_present = stripe
+            .stream_map()
+            .root_present()
+            .map(|stream| PresentDecoder {
+                inner: Box::new(BooleanDecoder::new(stream)),
+            });
+
         Ok(Self {
             stripe,
             schema_ref,
             decoders,
+            root_present,
             index: 0,
             batch_size,
             number_of_rows,
             row_selection,
             selection_index: 0,
+            selection_offset: 0,
         })
     }
 
     /// Skip the specified number of rows by calling skip_values on each decoder
     fn skip_rows(&mut self, count: usize) -> Result<()> {
         // Call skip_values on each decoder to efficiently skip rows
-        // Top-level decoders don't have parent_present
+        let present = derive_present_vec(&mut self.root_present, None, count).transpose()?;
         for decoder in &mut self.decoders {
-            decoder.skip_values(count, None)?;
+            decoder.skip_values(count, present.as_ref())?;
         }
         Ok(())
     }

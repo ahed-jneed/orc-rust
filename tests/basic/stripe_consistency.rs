@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use arrow::array::{Array, Int32Array, StringArray};
+use arrow::array::{Array, AsArray, Int16Array, Int32Array, StringArray, UnionArray};
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use orc_rust::arrow_reader::ArrowReaderBuilder;
@@ -1708,4 +1708,359 @@ fn test_index_stream_longer_than_declared_is_refused() {
     let length = file.stripes[0].footer.streams[0].length();
     file.stripes[0].footer.streams[0].length = Some(length + 1);
     assert_refused(file.render(), "stripe footer streams hold");
+}
+
+fn runs(values: &[u64]) -> Vec<u8> {
+    values.chunks(100).flat_map(literal_run).collect()
+}
+
+fn list_of_strings_file(
+    lengths: &[u64],
+    dictionary_size: u32,
+    dictionary_lengths: &[u64],
+    dictionary: &[u8],
+    indexes: &[u64],
+) -> OrcFile {
+    let mut file = OrcFile::new(vec![stripe(
+        lengths.len() as u64,
+        &[
+            (1, Kind::Length, runs(lengths)),
+            (2, Kind::DictionaryData, dictionary.to_vec()),
+            (2, Kind::Length, runs(dictionary_lengths)),
+            (2, Kind::Data, runs(indexes)),
+        ],
+        &[
+            encoding(EncodingKind::Direct, None),
+            encoding(EncodingKind::Direct, None),
+            encoding(EncodingKind::Dictionary, Some(dictionary_size)),
+        ],
+    )]);
+    file.types = vec![
+        node(TypeKind::Struct, &[1], &["l"]),
+        node(TypeKind::List, &[2], &[]),
+        node(TypeKind::String, &[], &[]),
+    ];
+    file
+}
+
+fn map_of_strings_file(dictionary_size: u32) -> OrcFile {
+    let mut file = OrcFile::new(vec![stripe(
+        1,
+        &[
+            (1, Kind::Length, runs(&[1])),
+            (2, Kind::DictionaryData, b"x".to_vec()),
+            (2, Kind::Length, runs(&[1])),
+            (2, Kind::Data, runs(&[0])),
+            (3, Kind::Data, signed_run(&[7])),
+        ],
+        &[
+            encoding(EncodingKind::Direct, None),
+            encoding(EncodingKind::Direct, None),
+            encoding(EncodingKind::Dictionary, Some(dictionary_size)),
+            encoding(EncodingKind::Direct, None),
+        ],
+    )]);
+    file.types = vec![
+        node(TypeKind::Struct, &[1], &["m"]),
+        node(TypeKind::Map, &[2, 3], &[]),
+        node(TypeKind::String, &[], &[]),
+        node(TypeKind::Int, &[], &[]),
+    ];
+    file
+}
+
+fn list_values(file: Bytes) -> Result<Vec<Vec<String>>, String> {
+    let mut out = vec![];
+    for batch in read(file, 8192)? {
+        let lists = batch.column(0).as_list::<i32>();
+        for row in 0..lists.len() {
+            let values = lists.value(row);
+            let values = values.as_any().downcast_ref::<StringArray>().unwrap();
+            out.push(values.iter().map(|v| v.unwrap().to_string()).collect());
+        }
+    }
+    Ok(out)
+}
+
+#[test]
+fn test_dictionary_with_more_entries_than_rows_inside_a_list_reads() {
+    let file = list_of_strings_file(&[3], 3, &[1, 1, 1], b"xyz", &[2, 0, 1]);
+    assert_eq!(list_values(file.render()).unwrap(), [["z", "x", "y"]]);
+}
+
+#[test]
+fn test_dictionary_with_more_entries_than_one_chunk_inside_a_list_reads() {
+    let entries = 10_000;
+    let indexes = (0..entries as u64).rev().collect::<Vec<_>>();
+    let dictionary = (0..entries)
+        .map(|n| b'a' + (n % 26) as u8)
+        .collect::<Vec<_>>();
+    let file = list_of_strings_file(
+        &[entries as u64],
+        entries,
+        &vec![1; entries as usize],
+        &dictionary,
+        &indexes,
+    );
+    let values = list_values(file.render()).unwrap();
+    assert_eq!(values.len(), 1);
+    assert_eq!(values[0].len(), entries as usize);
+    assert_eq!(
+        values[0][0],
+        ((b'a' + (9_999 % 26) as u8) as char).to_string()
+    );
+    assert_eq!(values[0][9_999], "a");
+}
+
+#[test]
+fn test_dictionary_declared_larger_than_its_streams_inside_a_list_is_refused() {
+    let file = list_of_strings_file(&[3], 10, &[1, 1, 1], b"xyz", &[2, 0, 1]);
+    assert!(list_values(file.render()).is_err());
+}
+
+#[test]
+fn test_dictionary_data_ending_before_its_lengths_inside_a_list_is_refused() {
+    let file = list_of_strings_file(&[3], 3, &[1, 1, 5], b"xyz", &[2, 0, 1]);
+    let error = list_values(file.render()).unwrap_err();
+    assert!(error.contains("ends before its lengths"), "{error}");
+}
+
+#[cfg(unix)]
+const LIMITED_MEMORY_CHILD: &str = "ORC_LIMITED_MEMORY_CHILD";
+
+#[cfg(unix)]
+fn in_limited_memory(test: &str) -> bool {
+    if std::env::var_os(LIMITED_MEMORY_CHILD).is_some() {
+        return true;
+    }
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "ulimit -v 4000000 && exec \"$0\" --exact stripe_consistency::{test} --nocapture"
+        ))
+        .arg(std::env::current_exe().unwrap())
+        .env(LIMITED_MEMORY_CHILD, "1")
+        .stdin(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "{test} failed or aborted with {status}");
+    false
+}
+
+#[cfg(unix)]
+#[test]
+fn test_huge_declared_dictionary_inside_a_list_is_refused_without_allocating() {
+    if in_limited_memory(
+        "test_huge_declared_dictionary_inside_a_list_is_refused_without_allocating",
+    ) {
+        let file = list_of_strings_file(&[3], 4_000_000_000, &[1, 1, 1], b"xyz", &[2, 0, 1]);
+        assert!(list_values(file.render()).is_err());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_huge_declared_dictionary_inside_a_map_is_refused_without_allocating() {
+    if in_limited_memory("test_huge_declared_dictionary_inside_a_map_is_refused_without_allocating")
+    {
+        assert!(read(map_of_strings_file(4_000_000_000).render(), 8192).is_err());
+    }
+}
+
+#[test]
+fn test_dictionary_inside_a_map_reads() {
+    let batches = read(map_of_strings_file(1).render(), 8192).unwrap();
+    assert_eq!(batches[0].num_rows(), 1);
+}
+
+fn direct_v2_run(width_code: u8, bytes_per_value: usize, values: &[u64]) -> Vec<u8> {
+    let mut out = vec![0x40 | (width_code << 1), values.len() as u8 - 1];
+    for value in values {
+        out.extend_from_slice(&value.to_be_bytes()[8 - bytes_per_value..]);
+    }
+    out
+}
+
+fn wide_after(narrow: i64, wide: u64, width_code: u8, bytes_per_value: usize) -> Vec<u8> {
+    direct_v2_run(width_code, bytes_per_value, &[zigzag(narrow), wide])
+}
+
+fn union_file(types: Vec<Type>, streams: &[(u32, Kind, Vec<u8>)], columns: usize) -> OrcFile {
+    let mut encodings = direct(columns);
+    for (column, _, _) in streams {
+        if *column as usize == columns - 1 {
+            encodings[columns - 1] = encoding(EncodingKind::DirectV2, None);
+        }
+    }
+    let mut file = OrcFile::new(vec![stripe(1, streams, &encodings)]);
+    file.types = types;
+    file
+}
+
+const TAG_ZERO: [u8; 2] = [0xFF, 0x00];
+const WIDTH_48: (u8, usize) = (29, 6);
+const WIDTH_32: (u8, usize) = (27, 4);
+
+fn read_union(file: OrcFile) -> Result<UnionArray, String> {
+    let batches = read(file.render(), 8192)?;
+    Ok(batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<UnionArray>()
+        .unwrap()
+        .clone())
+}
+
+#[test]
+fn test_unread_wide_value_of_an_int_inside_a_struct_inside_a_union_is_ignored() {
+    let file = union_file(
+        vec![
+            node(TypeKind::Struct, &[1], &["u"]),
+            node(TypeKind::Union, &[2], &[]),
+            node(TypeKind::Struct, &[3], &["a"]),
+            node(TypeKind::Int, &[], &[]),
+        ],
+        &[
+            (1, Kind::Data, TAG_ZERO.to_vec()),
+            (
+                3,
+                Kind::Data,
+                wide_after(5, 1 << 47, WIDTH_48.0, WIDTH_48.1),
+            ),
+        ],
+        4,
+    );
+    let union = read_union(file).unwrap();
+    let inner = union.child(0).as_struct();
+    assert_eq!(
+        inner
+            .column(0)
+            .as_primitive::<arrow::datatypes::Int32Type>()
+            .value(0),
+        5
+    );
+}
+
+#[test]
+fn test_unread_wide_value_of_an_int_inside_a_list_inside_a_union_is_ignored() {
+    let file = union_file(
+        vec![
+            node(TypeKind::Struct, &[1], &["u"]),
+            node(TypeKind::Union, &[2], &[]),
+            node(TypeKind::List, &[3], &[]),
+            node(TypeKind::Int, &[], &[]),
+        ],
+        &[
+            (1, Kind::Data, TAG_ZERO.to_vec()),
+            (2, Kind::Length, runs(&[1])),
+            (
+                3,
+                Kind::Data,
+                wide_after(5, 1 << 47, WIDTH_48.0, WIDTH_48.1),
+            ),
+        ],
+        4,
+    );
+    let union = read_union(file).unwrap();
+    let values = union.child(0).as_list::<i32>().value(0);
+    assert_eq!(
+        values
+            .as_primitive::<arrow::datatypes::Int32Type>()
+            .values(),
+        &[5]
+    );
+}
+
+#[test]
+fn test_unread_wide_value_of_a_short_inside_a_union_is_ignored() {
+    let file = union_file(
+        vec![
+            node(TypeKind::Struct, &[1], &["u"]),
+            node(TypeKind::Union, &[2], &[]),
+            node(TypeKind::Short, &[], &[]),
+        ],
+        &[
+            (1, Kind::Data, TAG_ZERO.to_vec()),
+            (
+                2,
+                Kind::Data,
+                wide_after(5, 1 << 21, WIDTH_32.0, WIDTH_32.1),
+            ),
+        ],
+        3,
+    );
+    let union = read_union(file).unwrap();
+    let shorts = union
+        .child(0)
+        .as_any()
+        .downcast_ref::<Int16Array>()
+        .unwrap();
+    assert_eq!(shorts.value(0), 5);
+}
+
+#[test]
+fn test_unread_wide_value_of_a_date_inside_a_union_is_ignored() {
+    let file = union_file(
+        vec![
+            node(TypeKind::Struct, &[1], &["u"]),
+            node(TypeKind::Union, &[2], &[]),
+            node(TypeKind::Date, &[], &[]),
+        ],
+        &[
+            (1, Kind::Data, TAG_ZERO.to_vec()),
+            (
+                2,
+                Kind::Data,
+                wide_after(5, 1 << 47, WIDTH_48.0, WIDTH_48.1),
+            ),
+        ],
+        3,
+    );
+    let union = read_union(file).unwrap();
+    let dates = union
+        .child(0)
+        .as_primitive::<arrow::datatypes::Date32Type>();
+    assert_eq!(dates.value(0), 5);
+}
+
+#[test]
+fn test_read_wide_value_of_a_short_inside_a_union_is_refused() {
+    let file = union_file(
+        vec![
+            node(TypeKind::Struct, &[1], &["u"]),
+            node(TypeKind::Union, &[2], &[]),
+            node(TypeKind::Short, &[], &[]),
+        ],
+        &[
+            (1, Kind::Data, TAG_ZERO.to_vec()),
+            (
+                2,
+                Kind::Data,
+                wide_after(1 << 20, 0, WIDTH_32.0, WIDTH_32.1),
+            ),
+        ],
+        3,
+    );
+    assert!(read_union(file).is_err());
+}
+
+#[test]
+fn test_wide_value_of_an_int_outside_a_union_is_refused() {
+    let file = union_file(
+        vec![
+            node(TypeKind::Struct, &[1], &["a"]),
+            node(TypeKind::Int, &[], &[]),
+        ],
+        &[(
+            1,
+            Kind::Data,
+            wide_after(5, 1 << 47, WIDTH_48.0, WIDTH_48.1),
+        )],
+        2,
+    );
+    let error = read(file.render(), 8192).unwrap_err();
+    assert!(
+        error.contains("byte width of direct encoding exceeds"),
+        "{error}"
+    );
 }

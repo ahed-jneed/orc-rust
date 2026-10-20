@@ -1,0 +1,290 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+import java.io.File;
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.sql.Timestamp;
+import java.util.*;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
+import org.apache.orc.CompressionKind;
+import org.apache.orc.OrcFile;
+import org.apache.orc.TypeDescription;
+import org.apache.orc.Writer;
+import ORC_VECTOR_PKG.*;
+import ORC_STORAGE_PKG.common.type.HiveDecimal;
+import ORC_STORAGE_PKG.serde2.io.HiveDecimalWritable;
+
+public class GenOrcCorpus {
+  static Random rng;
+  static double nullProb;
+
+  static boolean isNull() {
+    return rng.nextDouble() < nullProb;
+  }
+
+  static void fill(ColumnVector v, TypeDescription t, int start, int n, boolean allowNulls) {
+    v.noNulls = true;
+    for (int i = start; i < start + n; i++) {
+      v.isNull[i] = false;
+    }
+    if (allowNulls) {
+      for (int i = start; i < start + n; i++) {
+        if (isNull()) {
+          v.isNull[i] = true;
+          v.noNulls = false;
+        }
+      }
+    }
+    switch (t.getCategory()) {
+      case BOOLEAN:
+        for (int i = start; i < start + n; i++) ((LongColumnVector) v).vector[i] = rng.nextBoolean() ? 1 : 0;
+        break;
+      case BYTE:
+        for (int i = start; i < start + n; i++) ((LongColumnVector) v).vector[i] = (byte) rng.nextInt();
+        break;
+      case SHORT:
+        for (int i = start; i < start + n; i++) ((LongColumnVector) v).vector[i] = (short) (rng.nextBoolean() ? rng.nextInt(10) : rng.nextInt());
+        break;
+      case INT:
+        for (int i = start; i < start + n; i++) ((LongColumnVector) v).vector[i] = rng.nextInt(4) == 0 ? rng.nextInt() : (i / 7) * 3;
+        break;
+      case LONG:
+        for (int i = start; i < start + n; i++) ((LongColumnVector) v).vector[i] = rng.nextInt(4) == 0 ? rng.nextLong() : (long) i * 1000003L;
+        break;
+      case DATE:
+        for (int i = start; i < start + n; i++) ((LongColumnVector) v).vector[i] = rng.nextInt(60000) - 20000;
+        break;
+      case FLOAT:
+        for (int i = start; i < start + n; i++) ((DoubleColumnVector) v).vector[i] = (float) (rng.nextGaussian() * 1000);
+        break;
+      case DOUBLE:
+        for (int i = start; i < start + n; i++) ((DoubleColumnVector) v).vector[i] = rng.nextGaussian() * 1e9;
+        break;
+      case STRING:
+      case VARCHAR:
+      case CHAR: {
+        BytesColumnVector b = (BytesColumnVector) v;
+        int max = t.getCategory() == TypeDescription.Category.STRING ? 30 : t.getMaxLength();
+        for (int i = start; i < start + n; i++) {
+          String s;
+          if (rng.nextBoolean()) {
+            s = "k" + rng.nextInt(8);
+          } else {
+            StringBuilder sb = new StringBuilder();
+            int len = rng.nextInt(max + 1);
+            for (int j = 0; j < len; j++) sb.append((char) ('a' + rng.nextInt(26)));
+            s = sb.toString();
+          }
+          if (t.getCategory() == TypeDescription.Category.CHAR) {
+            StringBuilder sb = new StringBuilder(s);
+            while (sb.length() < max) sb.append(' ');
+            s = sb.substring(0, max);
+          } else if (s.length() > max) {
+            s = s.substring(0, max);
+          }
+          byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
+          b.setVal(i, bytes, 0, bytes.length);
+        }
+        break;
+      }
+      case BINARY: {
+        BytesColumnVector b = (BytesColumnVector) v;
+        for (int i = start; i < start + n; i++) {
+          byte[] bytes = new byte[rng.nextInt(12)];
+          rng.nextBytes(bytes);
+          b.setVal(i, bytes, 0, bytes.length);
+        }
+        break;
+      }
+      case DECIMAL: {
+        DecimalColumnVector d = (DecimalColumnVector) v;
+        for (int i = start; i < start + n; i++) {
+          BigDecimal bd = new BigDecimal(new java.math.BigInteger(Math.max(1, t.getPrecision() * 3), rng)).movePointLeft(t.getScale());
+          bd = bd.remainder(BigDecimal.TEN.pow(t.getPrecision() - t.getScale()));
+          d.vector[i].set(HiveDecimal.create(bd.setScale(t.getScale(), java.math.RoundingMode.DOWN)));
+        }
+        break;
+      }
+      case TIMESTAMP_INSTANT:
+      case TIMESTAMP: {
+        TimestampColumnVector tv = (TimestampColumnVector) v;
+        for (int i = start; i < start + n; i++) {
+          Timestamp ts = new Timestamp((long) rng.nextInt(1_900_000_000) * 1000L - 300_000_000_000L + rng.nextInt(1000));
+          ts.setNanos(rng.nextInt(4) == 0 ? rng.nextInt(1_000_000_000) : ts.getNanos());
+          tv.set(i, ts);
+        }
+        break;
+      }
+      case STRUCT: {
+        StructColumnVector s = (StructColumnVector) v;
+        List<TypeDescription> kids = t.getChildren();
+        for (int c = 0; c < kids.size(); c++) fill(s.fields[c], kids.get(c), start, n, true);
+        break;
+      }
+      case LIST: {
+        ListColumnVector l = (ListColumnVector) v;
+        int offset = l.childCount;
+        for (int i = start; i < start + n; i++) {
+          l.offsets[i] = offset;
+          l.lengths[i] = l.isNull[i] ? 0 : rng.nextInt(4);
+          offset += (int) l.lengths[i];
+        }
+        l.childCount = offset;
+        l.child.ensureSize(offset, true);
+        fillChild(l.child, t.getChildren().get(0), offset - sumLengths(l, start, n), sumLengths(l, start, n));
+        break;
+      }
+      case MAP: {
+        MapColumnVector m = (MapColumnVector) v;
+        int offset = m.childCount;
+        for (int i = start; i < start + n; i++) {
+          m.offsets[i] = offset;
+          m.lengths[i] = m.isNull[i] ? 0 : rng.nextInt(4);
+          offset += (int) m.lengths[i];
+        }
+        m.childCount = offset;
+        m.keys.ensureSize(offset, true);
+        m.values.ensureSize(offset, true);
+        int cnt = sumLengthsMap(m, start, n);
+        fillChild(m.keys, t.getChildren().get(0), offset - cnt, cnt, false);
+        fillChild(m.values, t.getChildren().get(1), offset - cnt, cnt);
+        break;
+      }
+      case UNION: {
+        UnionColumnVector u = (UnionColumnVector) v;
+        List<TypeDescription> kids = t.getChildren();
+        for (int i = start; i < start + n; i++) {
+          u.tags[i] = rng.nextInt(kids.size());
+        }
+        for (int c = 0; c < kids.size(); c++) fill(u.fields[c], kids.get(c), start, n, true);
+        break;
+      }
+      default:
+        throw new IllegalArgumentException(t.toString());
+    }
+  }
+
+  static int sumLengths(ListColumnVector l, int start, int n) {
+    int s = 0;
+    for (int i = start; i < start + n; i++) s += (int) l.lengths[i];
+    return s;
+  }
+
+  static int sumLengthsMap(MapColumnVector l, int start, int n) {
+    int s = 0;
+    for (int i = start; i < start + n; i++) s += (int) l.lengths[i];
+    return s;
+  }
+
+  static void fillChild(ColumnVector v, TypeDescription t, int start, int n) {
+    fillChild(v, t, start, n, true);
+  }
+
+  static void fillChild(ColumnVector v, TypeDescription t, int start, int n, boolean nulls) {
+    if (n > 0) fill(v, t, start, n, nulls);
+  }
+
+  static CompressionKind codec(String name) {
+    return CompressionKind.valueOf(name);
+  }
+
+  public static void main(String[] args) throws Exception {
+    String out = args[0];
+    try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(args[1]))) {
+      String line;
+      while ((line = r.readLine()) != null) {
+        if (line.isEmpty()) continue;
+        String[] f = line.split("\t", -1);
+        try {
+          write(out, f);
+          System.out.println("OK\t" + f[0]);
+        } catch (Throwable e) {
+          System.out.println("FAIL\t" + f[0] + "\t" + e);
+        }
+      }
+    }
+  }
+
+  static void write(String out, String[] args) throws Exception {
+    String name = args[0];
+    String schema = args[1];
+    String comp = args[2];
+    long stripeSize = Long.parseLong(args[3]);
+    int stride = Integer.parseInt(args[4]);
+    boolean padding = Boolean.parseBoolean(args[5]);
+    String bloom = args[6];
+    String version = args[7];
+    int rows = Integer.parseInt(args[8]);
+    long seed = Long.parseLong(args[9]);
+    nullProb = Double.parseDouble(args[10]);
+    String strategy = args[11];
+    int batchSize = Integer.parseInt(args[12]);
+    rng = new Random(seed);
+
+    Configuration conf = new Configuration();
+    TypeDescription t = TypeDescription.fromString(schema);
+    OrcFile.WriterOptions opts = OrcFile.writerOptions(conf)
+        .setSchema(t)
+        .compress(codec(comp))
+        .stripeSize(stripeSize)
+        .rowIndexStride(stride)
+        .blockPadding(padding)
+        .overwrite(true);
+    if (!bloom.isEmpty()) opts.bloomFilterColumns(bloom);
+    if (!version.isEmpty()) opts.version(OrcFile.Version.byName(version));
+    opts.encodingStrategy(OrcFile.EncodingStrategy.valueOf(strategy));
+    new File(out).mkdirs();
+    Path path = new Path(out, name + ".orc");
+    Writer w = OrcFile.createWriter(path, opts);
+    VectorizedRowBatch batch = t.createRowBatch(batchSize);
+    int written = 0;
+    while (written < rows) {
+      int n = Math.min(batchSize, rows - written);
+      batch.reset();
+      batch.size = n;
+      List<TypeDescription> kids = t.getChildren();
+      for (int c = 0; c < kids.size(); c++) {
+        resetVector(batch.cols[c]);
+        fill(batch.cols[c], kids.get(c), 0, n, true);
+      }
+      w.addRowBatch(batch);
+      written += n;
+    }
+    w.close();
+  }
+
+  static void resetVector(ColumnVector v) {
+    v.reset();
+    if (v instanceof ListColumnVector) {
+      ((ListColumnVector) v).childCount = 0;
+      resetVector(((ListColumnVector) v).child);
+    } else if (v instanceof MapColumnVector) {
+      ((MapColumnVector) v).childCount = 0;
+      resetVector(((MapColumnVector) v).keys);
+      resetVector(((MapColumnVector) v).values);
+    } else if (v instanceof StructColumnVector) {
+      for (ColumnVector f : ((StructColumnVector) v).fields) resetVector(f);
+    } else if (v instanceof UnionColumnVector) {
+      for (ColumnVector f : ((UnionColumnVector) v).fields) resetVector(f);
+    }
+  }
+}
